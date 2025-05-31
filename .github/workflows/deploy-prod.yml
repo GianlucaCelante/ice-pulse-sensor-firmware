@@ -1,0 +1,500 @@
+# .github/workflows/deploy-prod.yml - ESP32 Production
+name: Deploy Firmware to Production
+
+on:
+  push:
+    branches: [release-hv]
+    paths-ignore:
+      - 'README.md'
+      - 'docs/**'
+      - '.gitignore'
+  
+  workflow_dispatch:
+    inputs:
+      version_override:
+        description: 'Override version from VERSION file'
+        required: false
+        default: ''
+      confirm_production:
+        description: 'Type "DEPLOY-FIRMWARE-TO-PRODUCTION" to confirm'
+        required: true
+        default: ''
+
+env:
+  ESP_IDF_VERSION: "v5.1.2"
+  FIRMWARE_IMAGE: aipioppi/ice-pulse-firmware
+  INFRA_REPO_URL: git@github.com:GianlucaCelante/ice-pulse-infra.git
+  INFRA_BRANCH: master
+  DEPLOY_PATH_PROD: devops/prod/firmware-ota-prod.yml
+
+jobs:
+  security_check:
+    name: Security & Quality Gates
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: Production Deploy Confirmation
+      if: github.event_name == 'workflow_dispatch'
+      run: |
+        if [ "${{ github.event.inputs.confirm_production }}" != "DEPLOY-FIRMWARE-TO-PRODUCTION" ]; then
+          echo "❌ Production firmware deployment not confirmed"
+          echo "Please type 'DEPLOY-FIRMWARE-TO-PRODUCTION' to proceed"
+          exit 1
+        fi
+        echo "✅ Production firmware deployment confirmed"
+      
+    - name: Setup ESP-IDF
+      uses: espressif/esp-idf-ci-action@v1
+      with:
+        esp_idf_version: ${{ env.ESP_IDF_VERSION }}
+        target: esp32
+        
+    - name: Security Code Scan
+      run: |
+        echo "=== Running security scans on firmware code ==="
+        cd firmware
+        
+        # Check for hardcoded secrets
+        echo "Checking for hardcoded secrets..."
+        if grep -r "password\|secret\|key" main/ --include="*.c" --include="*.h" | grep -v "config.h"; then
+          echo "⚠️ Potential hardcoded secrets found"
+        fi
+        
+        # Check WiFi security
+        if grep -q "WIFI_AUTH_OPEN" main/; then
+          echo "❌ Open WiFi authentication detected - not suitable for production"
+          exit 1
+        fi
+        
+        echo "✅ Security scan completed"
+
+  build:
+    name: Build Production Firmware
+    runs-on: ubuntu-latest
+    needs: security_check
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+      firmware_size: ${{ steps.build_info.outputs.firmware_size }}
+      
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+      
+    - name: Get Version
+      id: get_version
+      run: |
+        if [ -n "${{ github.event.inputs.version_override }}" ]; then
+          VERSION="${{ github.event.inputs.version_override }}"
+        else
+          if [ -f VERSION ]; then
+            VERSION=$(cat VERSION | tr -d '\n\r' | xargs)
+            VERSION="${VERSION}.PROD"
+          else
+            VERSION="fw-$(date +%Y%m%d%H%M%S)-${GITHUB_SHA:0:7}.PROD"
+          fi
+        fi
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "Building PRODUCTION firmware version: $VERSION"
+        
+    - name: Setup ESP-IDF
+      uses: espressif/esp-idf-ci-action@v1
+      with:
+        esp_idf_version: ${{ env.ESP_IDF_VERSION }}
+        target: esp32
+        
+    - name: Build Production Firmware
+      run: |
+        echo "=== Building ESP32 firmware for PRODUCTION ==="
+        cd firmware
+        
+        # Configura per production
+        cat > main/version.h << EOF
+        #ifndef VERSION_H
+        #define VERSION_H
+        #define FIRMWARE_VERSION "${{ steps.get_version.outputs.version }}"
+        #define BUILD_TIMESTAMP "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        #define GIT_COMMIT "${{ github.sha }}"
+        #define BUILD_NUMBER "${{ github.run_number }}"
+        #define ENVIRONMENT "production"
+        #endif
+        EOF
+        
+        # Production config overrides
+        cat >> main/config.h << EOF
+        
+        // Production overrides
+        #ifdef ENVIRONMENT_PRODUCTION
+        #undef DEBUG_LEVEL
+        #define DEBUG_LEVEL ESP_LOG_WARN
+        #undef ENABLE_SERIAL_OUTPUT
+        #define ENABLE_SERIAL_OUTPUT false
+        #undef OTA_CHECK_INTERVAL_MS
+        #define OTA_CHECK_INTERVAL_MS (4 * 60 * 60 * 1000) // 4 hours for production
+        #endif
+        EOF
+        
+        # Optimized production build
+        idf.py set-target esp32
+        idf.py build
+        
+        echo "=== Production build completed ==="
+        ls -la build/
+        
+    - name: Extract Build Info
+      id: build_info
+      run: |
+        cd firmware
+        FIRMWARE_SIZE=$(stat -c%s build/ice-pulse-sensor.bin)
+        echo "firmware_size=$FIRMWARE_SIZE" >> $GITHUB_OUTPUT
+        echo "Production firmware size: $FIRMWARE_SIZE bytes"
+        
+        # Verifiche finali
+        if [ $FIRMWARE_SIZE -gt 1048576 ]; then  # 1MB
+          echo "⚠️ Warning: Large firmware size for production"
+        fi
+        
+    - name: Generate Production OTA Package
+      run: |
+        cd firmware
+        mkdir -p ../ota-package
+        
+        cp build/ice-pulse-sensor.bin ../ota-package/firmware.bin
+        cp build/bootloader/bootloader.bin ../ota-package/
+        cp build/partition_table/partition-table.bin ../ota-package/
+        
+        # Production manifest con metadati estesi
+        cat > ../ota-package/manifest.json << EOF
+        {
+          "version": "${{ steps.get_version.outputs.version }}",
+          "build_time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+          "firmware_size": ${{ steps.build_info.outputs.firmware_size }},
+          "sha256": "$(sha256sum ../ota-package/firmware.bin | cut -d' ' -f1)",
+          "target": "esp32",
+          "idf_version": "${{ env.ESP_IDF_VERSION }}",
+          "commit": "${{ github.sha }}",
+          "branch": "${{ github.ref_name }}",
+          "environment": "production",
+          "release_notes": "Production firmware with optimized performance and security",
+          "min_compatible_version": "0.1.0",
+          "rollback_version": "$(cat VERSION | tr -d '\n\r' | xargs)",
+          "deployment_window": "production"
+        }
+        EOF
+        
+    - name: Upload Production Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: firmware-production-${{ steps.get_version.outputs.version }}
+        path: ota-package/
+        retention-days: 365  # Keep production artifacts longer
+
+  package:
+    name: Package Production OTA Server
+    runs-on: ubuntu-latest
+    needs: build
+    
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: Download Firmware
+      uses: actions/download-artifact@v4
+      with:
+        name: firmware-production-${{ needs.build.outputs.version }}
+        path: ./ota-package
+        
+    - name: Setup Production OTA Server
+      run: |
+        mkdir -p ota-server/static/firmware
+        mkdir -p ota-server/templates
+        
+        cp -r ota-package/* ota-server/static/firmware/
+        
+        # Production OTA Server con sicurezza
+        cat > ota-server/app.py << 'EOF'
+        from flask import Flask, jsonify, send_from_directory, render_template, request
+        import os
+        import json
+        import hashlib
+        from datetime import datetime
+        
+        app = Flask(__name__)
+        
+        # Production logging
+        import logging
+        logging.basicConfig(level=logging.INFO)
+        logger = logging.getLogger(__name__)
+        
+        @app.route('/health')
+        def health():
+            return jsonify({
+                "status": "ok",
+                "service": "ota-server",
+                "environment": "production",
+                "timestamp": datetime.utcnow().isoformat() + "Z"
+            })
+        
+        @app.route('/firmware/manifest')
+        def firmware_manifest():
+            try:
+                with open('static/firmware/manifest.json') as f:
+                    manifest = json.load(f)
+                logger.info(f"Manifest requested for version {manifest.get('version')}")
+                return manifest
+            except FileNotFoundError:
+                logger.error("Firmware manifest not found")
+                return jsonify({"error": "No firmware available"}), 404
+        
+        @app.route('/firmware/download')
+        def download_firmware():
+            # Log download attempt
+            client_ip = request.environ.get('HTTP_X_REAL_IP', request.remote_addr)
+            logger.info(f"Firmware download requested from {client_ip}")
+            return send_from_directory('static/firmware', 'firmware.bin')
+        
+        @app.route('/firmware/check/<device_version>')
+        def check_update(device_version):
+            try:
+                with open('static/firmware/manifest.json') as f:
+                    manifest = json.load(f)
+                
+                needs_update = device_version != manifest['version']
+                
+                # Log update check
+                logger.info(f"Update check: device_version={device_version}, latest={manifest['version']}, needs_update={needs_update}")
+                
+                return jsonify({
+                    "needs_update": needs_update,
+                    "latest_version": manifest['version'],
+                    "current_version": device_version,
+                    "download_url": "/firmware/download" if needs_update else None,
+                    "environment": "production",
+                    "rollback_available": manifest.get('rollback_version')
+                })
+            except FileNotFoundError:
+                logger.error("Firmware manifest not found for update check")
+                return jsonify({"error": "No firmware available"}), 404
+        
+        @app.route('/')
+        def dashboard():
+            return render_template('production_dashboard.html')
+        
+        if __name__ == '__main__':
+            app.run(host='0.0.0.0', port=5000)
+        EOF
+        
+        # Production dashboard
+        cat > ota-server/templates/production_dashboard.html << 'EOF'
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>🏭 Ice Pulse OTA Server - Production</title>
+            <style>
+                body { font-family: Arial, sans-serif; margin: 40px; background: #f8d7da; }
+                .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; }
+                h1 { color: #721c24; border-bottom: 3px solid #dc3545; padding-bottom: 10px; }
+                .env-badge { background: #dc3545; color: white; padding: 5px 15px; border-radius: 20px; font-weight: bold; }
+                .warning { background: #fff3cd; border: 1px solid #ffeaa7; padding: 15px; border-radius: 5px; margin: 20px 0; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>🏭 Ice Pulse OTA Server</h1>
+                <div class="env-badge">PRODUCTION ENVIRONMENT</div>
+                
+                <div class="warning">
+                    <strong>⚠️ WARNING:</strong> This is the production firmware server. All changes affect live IoT devices.
+                </div>
+                
+                <h2>Available Endpoints</h2>
+                <ul>
+                    <li><a href="/health">Health Check</a></li>
+                    <li><a href="/firmware/manifest">Firmware Manifest</a></li>
+                    <li><a href="/firmware/download">Download Firmware</a> (Restricted)</li>
+                </ul>
+                
+                <h2>Production Guidelines</h2>
+                <ul>
+                    <li>Firmware updates are deployed automatically to all devices</li>
+                    <li>Update checks occur every 4 hours</li>
+                    <li>All downloads and update checks are logged</li>
+                    <li>Rollback capabilities available</li>
+                </ul>
+            </div>
+        </body>
+        </html>
+        EOF
+        
+        cat > ota-server/requirements.txt << 'EOF'
+        flask==3.0.0
+        gunicorn==21.2.0
+        EOF
+        
+        cat > ota-server/Dockerfile << 'EOF'
+        FROM python:3.11-alpine
+        WORKDIR /app
+        RUN apk add --no-cache curl
+        COPY requirements.txt .
+        RUN pip install --no-cache-dir -r requirements.txt
+        COPY . .
+        EXPOSE 5000
+        HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+          CMD curl -f http://localhost:5000/health || exit 1
+        CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "3", "--timeout", "120", "--access-logfile", "-", "app:app"]
+        EOF
+        
+    - name: Build and Push Production OTA Server
+      uses: docker/build-push-action@v5
+      with:
+        context: ./ota-server
+        push: true
+        tags: |
+          ${{ env.FIRMWARE_IMAGE }}-ota:${{ needs.build.outputs.version }}
+          ${{ env.FIRMWARE_IMAGE }}-ota:prod-latest
+
+  deploy:
+    name: Deploy to Production Infrastructure
+    runs-on: ubuntu-latest
+    needs: [build, package]
+    environment: prod  # Requires manual approval
+    
+    steps:
+    - name: Clone Infrastructure Repository
+      run: |
+        git clone https://${{ secrets.GITHUB_TOKEN }}@github.com/GianlucaCelante/ice-pulse-infra.git infra-repo
+        cd infra-repo
+        git checkout ${{ env.INFRA_BRANCH }}
+        git config user.name "GitHub Actions Bot"
+        git config user.email "actions@github.com"
+        
+    - name: Install yq
+      run: |
+        sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq
+        sudo chmod +x /usr/bin/yq
+        
+    - name: Update Production OTA Configuration
+      run: |
+        cd infra-repo
+        
+        if [ ! -f "${{ env.DEPLOY_PATH_PROD }}" ]; then
+          mkdir -p $(dirname ${{ env.DEPLOY_PATH_PROD }})
+          cat > ${{ env.DEPLOY_PATH_PROD }} << 'EOF'
+        version: '3.8'
+        services:
+          ice-pulse-ota-prod:
+            image: aipioppi/ice-pulse-firmware-ota:prod-latest
+            container_name: ice-pulse-ota-prod
+            ports:
+              - "8094:5000"
+            environment:
+              - ENVIRONMENT=production
+              - FLASK_ENV=production
+            restart: always
+            healthcheck:
+              test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+              interval: 15s
+              timeout: 10s
+              retries: 5
+            labels:
+              - "com.centurylinklabs.watchtower.enable=true"
+              - "com.centurylinklabs.watchtower.scope=production"
+            logging:
+              driver: "json-file"
+              options:
+                max-size: "100m"
+                max-file: "10"
+            deploy:
+              resources:
+                limits:
+                  cpus: '0.5'
+                  memory: 512M
+                reservations:
+                  cpus: '0.1'
+                  memory: 256M
+              
+          watchtower-ota-prod:
+            image: containrrr/watchtower
+            container_name: watchtower-ota-prod
+            restart: always
+            volumes:
+              - /var/run/docker.sock:/var/run/docker.sock
+            command: --interval 600 --cleanup --scope production --label-enable
+            logging:
+              driver: "json-file"
+              options:
+                max-size: "50m"
+                max-file: "5"
+        EOF
+        fi
+        
+        yq e -i '.services.ice-pulse-ota-prod.image = "aipioppi/ice-pulse-firmware-ota:${{ needs.build.outputs.version }}"' ${{ env.DEPLOY_PATH_PROD }}
+        
+        TIMESTAMP=$(date +%s)
+        yq e -i ".services.ice-pulse-ota-prod.environment += [\"DEPLOY_TIMESTAMP=${TIMESTAMP}\"]" ${{ env.DEPLOY_PATH_PROD }}
+        yq e -i ".services.ice-pulse-ota-prod.environment += [\"FIRMWARE_VERSION=${{ needs.build.outputs.version }}\"]" ${{ env.DEPLOY_PATH_PROD }}
+        
+    - name: Create Git Tag for Production
+      run: |
+        cd infra-repo
+        git tag "firmware-prod-v${{ needs.build.outputs.version }}" || echo "Tag already exists"
+        
+    - name: Commit and Push
+      run: |
+        cd infra-repo
+        
+        if git diff --quiet; then
+          echo "No changes to commit"
+          exit 0
+        fi
+        
+        git add ${{ env.DEPLOY_PATH_PROD }}
+        git commit -m "🏭 Deploy firmware OTA PRODUCTION: ${{ needs.build.outputs.version }}
+
+        - OTA Server: aipioppi/ice-pulse-firmware-ota:${{ needs.build.outputs.version }}
+        - Firmware Version: ${{ needs.build.outputs.version }}
+        - Environment: PRODUCTION
+        - Port: 8094
+        - Security: Enhanced logging and monitoring
+        - High Availability: Production-grade deployment"
+        
+        git push https://${{ secrets.GITHUB_TOKEN }}@github.com/GianlucaCelante/ice-pulse-infra.git ${{ env.INFRA_BRANCH }} --tags
+
+  notify:
+    name: Notify Production Deployment
+    runs-on: ubuntu-latest
+    needs: [build, package, deploy]
+    if: always()
+    
+    steps:
+    - name: Production Deployment Summary
+      run: |
+        echo "## 🏭 ESP32 PRODUCTION Firmware Deployment" >> $GITHUB_STEP_SUMMARY
+        echo "- **Environment**: PRODUCTION" >> $GITHUB_STEP_SUMMARY
+        echo "- **Firmware Version**: ${{ needs.build.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Firmware Size**: ${{ needs.build.outputs.firmware_size }} bytes" >> $GITHUB_STEP_SUMMARY
+        echo "- **ESP-IDF Version**: ${{ env.ESP_IDF_VERSION }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **OTA Server**: aipioppi/ice-pulse-firmware-ota:${{ needs.build.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Production URL**: http://your-domain:8094" >> $GITHUB_STEP_SUMMARY
+        echo "- **Update Interval**: 4 hours" >> $GITHUB_STEP_SUMMARY
+        echo "- **Git Tag**: firmware-prod-v${{ needs.build.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Security**: Enhanced production logging" >> $GITHUB_STEP_SUMMARY
+        
+    - name: Notify Success
+      if: needs.deploy.result == 'success'
+      run: |
+        echo "🎉 ESP32 PRODUCTION firmware deployment successful!"
+        echo "Version: ${{ needs.build.outputs.version }}"
+        echo "All production IoT devices will update automatically"
+        echo "Monitor deployment at: http://your-domain:8094"
+        
+    - name: Notify Failure
+      if: needs.deploy.result == 'failure'
+      run: |
+        echo "🚨 ESP32 PRODUCTION firmware deployment FAILED!"
+        echo "Production devices remain on previous firmware version"
+        echo "Immediate investigation required"

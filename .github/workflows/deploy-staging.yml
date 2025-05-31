@@ -1,1 +1,348 @@
-#
+# .github/workflows/deploy-staging.yml - ESP32 Staging
+name: Deploy Firmware to Staging
+
+on:
+  push:
+    branches: [release]
+    paths-ignore:
+      - 'README.md'
+      - 'docs/**'
+      - '.gitignore'
+  
+  workflow_dispatch:
+    inputs:
+      version_override:
+        description: 'Override version from VERSION file'
+        required: false
+        default: ''
+
+env:
+  ESP_IDF_VERSION: "v5.1.2"
+  FIRMWARE_IMAGE: aipioppi/ice-pulse-firmware
+  INFRA_REPO_URL: git@github.com:GianlucaCelante/ice-pulse-infra.git
+  INFRA_BRANCH: master
+  DEPLOY_PATH_STAGING: devops/staging/firmware-ota-staging.yml
+
+jobs:
+  build:
+    name: Build ESP32 Firmware (Staging)
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+      firmware_size: ${{ steps.build_info.outputs.firmware_size }}
+      
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+      
+    - name: Get Version
+      id: get_version
+      run: |
+        if [ -n "${{ github.event.inputs.version_override }}" ]; then
+          VERSION="${{ github.event.inputs.version_override }}"
+        else
+          if [ -f VERSION ]; then
+            VERSION=$(cat VERSION | tr -d '\n\r' | xargs)
+            VERSION="${VERSION}.RELEASE"
+          else
+            VERSION="fw-$(date +%Y%m%d%H%M%S)-${GITHUB_SHA:0:7}.RELEASE"
+          fi
+        fi
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "Building staging firmware version: $VERSION"
+        
+    - name: Setup ESP-IDF
+      uses: espressif/esp-idf-ci-action@v1
+      with:
+        esp_idf_version: ${{ env.ESP_IDF_VERSION }}
+        target: esp32
+        
+    - name: Build Staging Firmware
+      run: |
+        echo "=== Building ESP32 firmware for STAGING ==="
+        cd firmware
+        
+        # Configura per staging
+        cat > main/version.h << EOF
+        #ifndef VERSION_H
+        #define VERSION_H
+        #define FIRMWARE_VERSION "${{ steps.get_version.outputs.version }}"
+        #define BUILD_TIMESTAMP "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        #define GIT_COMMIT "${{ github.sha }}"
+        #define BUILD_NUMBER "${{ github.run_number }}"
+        #define ENVIRONMENT "staging"
+        #endif
+        EOF
+        
+        # Override config per staging
+        cat >> main/config.h << EOF
+        
+        // Staging overrides
+        #ifdef ENVIRONMENT_STAGING
+        #undef API_ENDPOINT
+        #define API_ENDPOINT "http://localhost:8081/api/v1/sensors/data"
+        #undef OTA_SERVER_URL  
+        #define OTA_SERVER_URL "http://localhost:8093"
+        #endif
+        EOF
+        
+        # Build del firmware
+        idf.py set-target esp32
+        idf.py build
+        
+        echo "=== Staging build completed ==="
+        ls -la build/
+        
+    - name: Extract Build Info
+      id: build_info
+      run: |
+        cd firmware
+        FIRMWARE_SIZE=$(stat -c%s build/ice-pulse-sensor.bin)
+        echo "firmware_size=$FIRMWARE_SIZE" >> $GITHUB_OUTPUT
+        echo "Staging firmware size: $FIRMWARE_SIZE bytes"
+        
+    - name: Generate OTA Package
+      run: |
+        cd firmware
+        mkdir -p ../ota-package
+        
+        cp build/ice-pulse-sensor.bin ../ota-package/firmware.bin
+        cp build/bootloader/bootloader.bin ../ota-package/
+        cp build/partition_table/partition-table.bin ../ota-package/
+        
+        cat > ../ota-package/manifest.json << EOF
+        {
+          "version": "${{ steps.get_version.outputs.version }}",
+          "build_time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+          "firmware_size": ${{ steps.build_info.outputs.firmware_size }},
+          "sha256": "$(sha256sum ../ota-package/firmware.bin | cut -d' ' -f1)",
+          "target": "esp32",
+          "idf_version": "${{ env.ESP_IDF_VERSION }}",
+          "commit": "${{ github.sha }}",
+          "branch": "${{ github.ref_name }}",
+          "environment": "staging"
+        }
+        EOF
+        
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: firmware-staging-${{ steps.get_version.outputs.version }}
+        path: ota-package/
+        retention-days: 90
+
+  package:
+    name: Package Staging OTA Server
+    runs-on: ubuntu-latest
+    needs: build
+    
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: Download Firmware
+      uses: actions/download-artifact@v4
+      with:
+        name: firmware-staging-${{ needs.build.outputs.version }}
+        path: ./ota-package
+        
+    - name: Setup OTA Server
+      run: |
+        mkdir -p ota-server/static/firmware
+        mkdir -p ota-server/templates
+        
+        cp -r ota-package/* ota-server/static/firmware/
+        
+        # OTA Server per staging
+        cat > ota-server/app.py << 'EOF'
+        from flask import Flask, jsonify, send_from_directory, render_template
+        import os
+        import json
+        from datetime import datetime
+        
+        app = Flask(__name__)
+        
+        @app.route('/health')
+        def health():
+            return jsonify({
+                "status": "ok",
+                "service": "ota-server",
+                "environment": "staging",
+                "timestamp": datetime.utcnow().isoformat() + "Z"
+            })
+        
+        @app.route('/firmware/manifest')
+        def firmware_manifest():
+            with open('static/firmware/manifest.json') as f:
+                return json.load(f)
+        
+        @app.route('/firmware/download')
+        def download_firmware():
+            return send_from_directory('static/firmware', 'firmware.bin')
+        
+        @app.route('/firmware/check/<device_version>')
+        def check_update(device_version):
+            with open('static/firmware/manifest.json') as f:
+                manifest = json.load(f)
+            
+            needs_update = device_version != manifest['version']
+            return jsonify({
+                "needs_update": needs_update,
+                "latest_version": manifest['version'],
+                "current_version": device_version,
+                "download_url": "/firmware/download" if needs_update else None,
+                "environment": "staging"
+            })
+        
+        @app.route('/')
+        def dashboard():
+            return render_template('staging_dashboard.html')
+        
+        if __name__ == '__main__':
+            app.run(host='0.0.0.0', port=5000)
+        EOF
+        
+        # Dashboard staging
+        cat > ota-server/templates/staging_dashboard.html << 'EOF'
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>🧪 Ice Pulse OTA Server - Staging</title>
+            <style>
+                body { font-family: Arial, sans-serif; margin: 40px; background: #fff3cd; }
+                .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; }
+                h1 { color: #856404; border-bottom: 3px solid #ffc107; padding-bottom: 10px; }
+                .env-badge { background: #ffc107; color: #212529; padding: 5px 15px; border-radius: 20px; font-weight: bold; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>🧪 Ice Pulse OTA Server</h1>
+                <div class="env-badge">STAGING ENVIRONMENT</div>
+                <h2>Available Endpoints</h2>
+                <ul>
+                    <li><a href="/health">Health Check</a></li>
+                    <li><a href="/firmware/manifest">Firmware Manifest</a></li>
+                    <li><a href="/firmware/download">Download Firmware</a></li>
+                </ul>
+                <p><strong>Note:</strong> This is the staging environment for testing firmware updates before production deployment.</p>
+            </div>
+        </body>
+        </html>
+        EOF
+        
+        cat > ota-server/requirements.txt << 'EOF'
+        flask==3.0.0
+        gunicorn==21.2.0
+        EOF
+        
+        cat > ota-server/Dockerfile << 'EOF'
+        FROM python:3.11-alpine
+        WORKDIR /app
+        RUN apk add --no-cache curl
+        COPY requirements.txt .
+        RUN pip install --no-cache-dir -r requirements.txt
+        COPY . .
+        EXPOSE 5000
+        HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+          CMD curl -f http://localhost:5000/health || exit 1
+        CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "app:app"]
+        EOF
+        
+    - name: Build and Push Staging OTA Server
+      uses: docker/build-push-action@v5
+      with:
+        context: ./ota-server
+        push: true
+        tags: |
+          ${{ env.FIRMWARE_IMAGE }}-ota:${{ needs.build.outputs.version }}
+          ${{ env.FIRMWARE_IMAGE }}-ota:staging-latest
+
+  deploy:
+    name: Deploy to Infrastructure (Staging)
+    runs-on: ubuntu-latest
+    needs: [build, package]
+    
+    steps:
+    - name: Clone Infrastructure Repository
+      run: |
+        git clone https://${{ secrets.GITHUB_TOKEN }}@github.com/GianlucaCelante/ice-pulse-infra.git infra-repo
+        cd infra-repo
+        git checkout ${{ env.INFRA_BRANCH }}
+        git config user.name "GitHub Actions Bot"
+        git config user.email "actions@github.com"
+        
+    - name: Install yq
+      run: |
+        sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq
+        sudo chmod +x /usr/bin/yq
+        
+    - name: Update Staging OTA Configuration
+      run: |
+        cd infra-repo
+        
+        if [ ! -f "${{ env.DEPLOY_PATH_STAGING }}" ]; then
+          mkdir -p $(dirname ${{ env.DEPLOY_PATH_STAGING }})
+          cat > ${{ env.DEPLOY_PATH_STAGING }} << 'EOF'
+        version: '3.8'
+        services:
+          ice-pulse-ota-staging:
+            image: aipioppi/ice-pulse-firmware-ota:staging-latest
+            container_name: ice-pulse-ota-staging
+            ports:
+              - "8093:5000"
+            environment:
+              - ENVIRONMENT=staging
+              - FLASK_ENV=production
+            restart: always
+            healthcheck:
+              test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+              interval: 30s
+              timeout: 10s
+              retries: 3
+            labels:
+              - "com.centurylinklabs.watchtower.enable=true"
+              - "com.centurylinklabs.watchtower.scope=staging"
+            logging:
+              driver: "json-file"
+              options:
+                max-size: "50m"
+                max-file: "5"
+              
+          watchtower-ota-staging:
+            image: containrrr/watchtower
+            container_name: watchtower-ota-staging
+            restart: always
+            volumes:
+              - /var/run/docker.sock:/var/run/docker.sock
+            command: --interval 300 --cleanup --scope staging --label-enable
+        EOF
+        fi
+        
+        yq e -i '.services.ice-pulse-ota-staging.image = "aipioppi/ice-pulse-firmware-ota:${{ needs.build.outputs.version }}"' ${{ env.DEPLOY_PATH_STAGING }}
+        
+        TIMESTAMP=$(date +%s)
+        yq e -i ".services.ice-pulse-ota-staging.environment += [\"DEPLOY_TIMESTAMP=${TIMESTAMP}\"]" ${{ env.DEPLOY_PATH_STAGING }}
+        yq e -i ".services.ice-pulse-ota-staging.environment += [\"FIRMWARE_VERSION=${{ needs.build.outputs.version }}\"]" ${{ env.DEPLOY_PATH_STAGING }}
+        
+    - name: Commit and Push
+      run: |
+        cd infra-repo
+        
+        if git diff --quiet; then
+          echo "No changes to commit"
+          exit 0
+        fi
+        
+        git add ${{ env.DEPLOY_PATH_STAGING }}
+        git commit -m "🧪 Deploy firmware OTA staging: ${{ needs.build.outputs.version }}
+
+        - OTA Server: aipioppi/ice-pulse-firmware-ota:${{ needs.build.outputs.version }}
+        - Firmware Version: ${{ needs.build.outputs.version }}
+        - Environment: staging
+        - Port: 8093"
+        
+        git push https://${{ secrets.GITHUB_TOKEN }}@github.com/GianlucaCelante/ice-pulse-infra.git ${{ env.INFRA_BRANCH }}
+

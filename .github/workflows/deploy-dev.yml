@@ -1,3 +1,4 @@
+# .github/workflows/deploy-dev.yml - ESP32 Development
 name: Deploy Firmware to Development
 
 on:
@@ -14,19 +15,13 @@ on:
         description: 'Override version from VERSION file'
         required: false
         default: ''
-      flash_target:
-        description: 'Flash target (build-only/ota-server/test-device)'
-        required: false
-        default: 'ota-server'
 
 env:
   ESP_IDF_VERSION: "v5.1.2"
-  FIRMWARE_REGISTRY: docker.io/aipioppi
   FIRMWARE_IMAGE: aipioppi/ice-pulse-firmware
   INFRA_REPO_URL: git@github.com:GianlucaCelante/ice-pulse-infra.git
   INFRA_BRANCH: master
   DEPLOY_PATH_DEV: devops/dev/firmware-ota-dev.yml
-  OTA_SERVER_URL: "http://localhost:8092"
 
 jobs:
   build:
@@ -68,8 +63,16 @@ jobs:
         echo "=== Building ESP32 firmware ==="
         cd firmware
         
-        # Configura versione nel codice
-        echo "#define FIRMWARE_VERSION \"${{ steps.get_version.outputs.version }}\"" > main/version.h
+        # Aggiorna version.h con versione corrente
+        cat > main/version.h << EOF
+        #ifndef VERSION_H
+        #define VERSION_H
+        #define FIRMWARE_VERSION "${{ steps.get_version.outputs.version }}"
+        #define BUILD_TIMESTAMP "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        #define GIT_COMMIT "${{ github.sha }}"
+        #define BUILD_NUMBER "${{ github.run_number }}"
+        #endif
+        EOF
         
         # Build del firmware
         idf.py set-target esp32
@@ -84,8 +87,8 @@ jobs:
         cd firmware
         
         # Informazioni sul firmware
-        FIRMWARE_SIZE=$(stat -f%z build/ice-pulse-sensor.bin 2>/dev/null || stat -c%s build/ice-pulse-sensor.bin)
-        BOOTLOADER_SIZE=$(stat -f%z build/bootloader/bootloader.bin 2>/dev/null || stat -c%s build/bootloader/bootloader.bin)
+        FIRMWARE_SIZE=$(stat -c%s build/ice-pulse-sensor.bin)
+        BOOTLOADER_SIZE=$(stat -c%s build/bootloader/bootloader.bin)
         
         echo "firmware_size=$FIRMWARE_SIZE" >> $GITHUB_OUTPUT
         echo "bootloader_size=$BOOTLOADER_SIZE" >> $GITHUB_OUTPUT
@@ -115,7 +118,8 @@ jobs:
           "target": "esp32",
           "idf_version": "${{ env.ESP_IDF_VERSION }}",
           "commit": "${{ github.sha }}",
-          "branch": "${{ github.ref_name }}"
+          "branch": "${{ github.ref_name }}",
+          "environment": "development"
         }
         EOF
         
@@ -156,22 +160,30 @@ jobs:
         # Copia firmware nel server OTA
         cp -r artifacts/ota-package/* ota-server/static/firmware/
         
-        # Crea server OTA semplice (Flask/FastAPI)
+        # Crea server OTA Flask
         cat > ota-server/app.py << 'EOF'
-        from flask import Flask, jsonify, send_from_directory, render_template
+        from flask import Flask, jsonify, send_from_directory, render_template, request
         import os
         import json
+        from datetime import datetime
         
         app = Flask(__name__)
         
         @app.route('/health')
         def health():
-            return jsonify({"status": "ok", "service": "ota-server"})
+            return jsonify({
+                "status": "ok", 
+                "service": "ota-server",
+                "timestamp": datetime.utcnow().isoformat() + "Z"
+            })
         
         @app.route('/firmware/manifest')
         def firmware_manifest():
-            with open('static/firmware/manifest.json') as f:
-                return json.load(f)
+            try:
+                with open('static/firmware/manifest.json') as f:
+                    return json.load(f)
+            except FileNotFoundError:
+                return jsonify({"error": "No firmware available"}), 404
         
         @app.route('/firmware/download')
         def download_firmware():
@@ -179,15 +191,29 @@ jobs:
         
         @app.route('/firmware/check/<device_version>')
         def check_update(device_version):
-            with open('static/firmware/manifest.json') as f:
-                manifest = json.load(f)
-            
-            needs_update = device_version != manifest['version']
+            try:
+                with open('static/firmware/manifest.json') as f:
+                    manifest = json.load(f)
+                
+                needs_update = device_version != manifest['version']
+                return jsonify({
+                    "needs_update": needs_update,
+                    "latest_version": manifest['version'],
+                    "current_version": device_version,
+                    "download_url": "/firmware/download" if needs_update else None,
+                    "firmware_size": manifest.get('firmware_size', 0),
+                    "sha256": manifest.get('sha256', '')
+                })
+            except FileNotFoundError:
+                return jsonify({"error": "No firmware available"}), 404
+        
+        @app.route('/devices/<device_id>/update', methods=['POST'])
+        def trigger_update(device_id):
+            # Endpoint per triggare aggiornamenti manuali
             return jsonify({
-                "needs_update": needs_update,
-                "latest_version": manifest['version'],
-                "current_version": device_version,
-                "download_url": "/firmware/download" if needs_update else None
+                "device_id": device_id,
+                "update_triggered": True,
+                "timestamp": datetime.utcnow().isoformat() + "Z"
             })
         
         @app.route('/')
@@ -195,45 +221,102 @@ jobs:
             return render_template('dashboard.html')
         
         if __name__ == '__main__':
-            app.run(host='0.0.0.0', port=5000)
+            app.run(host='0.0.0.0', port=5000, debug=True)
         EOF
         
-        # Dashboard semplice
+        # Dashboard HTML migliorato
         cat > ota-server/templates/dashboard.html << 'EOF'
         <!DOCTYPE html>
-        <html>
-        <head><title>Ice Pulse OTA Server</title></head>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>🔌 Ice Pulse OTA Server</title>
+            <style>
+                body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 40px; background: #f5f5f5; }
+                .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+                h1 { color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }
+                .status { padding: 15px; margin: 20px 0; border-radius: 5px; }
+                .status.online { background: #d4edda; border: 1px solid #c3e6cb; color: #155724; }
+                .endpoint { background: #f8f9fa; padding: 15px; margin: 10px 0; border-radius: 5px; border-left: 4px solid #007bff; }
+                .endpoint code { background: #e9ecef; padding: 2px 5px; border-radius: 3px; }
+                a { color: #007bff; text-decoration: none; }
+                a:hover { text-decoration: underline; }
+                .footer { margin-top: 30px; text-align: center; color: #6c757d; font-size: 0.9em; }
+            </style>
+        </head>
         <body>
-        <h1>🚀 Ice Pulse OTA Server</h1>
-        <p>Firmware management for ESP32 devices</p>
-        <ul>
-          <li><a href="/firmware/manifest">Firmware Manifest</a></li>
-          <li><a href="/firmware/download">Download Latest Firmware</a></li>
-          <li><a href="/health">Health Check</a></li>
-        </ul>
+            <div class="container">
+                <h1>🔌 Ice Pulse OTA Server</h1>
+                <div class="status online">
+                    ✅ Server online and ready for ESP32 firmware updates
+                </div>
+                
+                <h2>📡 Available Endpoints</h2>
+                <div class="endpoint">
+                    <strong>Health Check:</strong><br>
+                    <code>GET <a href="/health">/health</a></code><br>
+                    <small>Check server status</small>
+                </div>
+                
+                <div class="endpoint">
+                    <strong>Firmware Manifest:</strong><br>
+                    <code>GET <a href="/firmware/manifest">/firmware/manifest</a></code><br>
+                    <small>Get firmware information and metadata</small>
+                </div>
+                
+                <div class="endpoint">
+                    <strong>Download Firmware:</strong><br>
+                    <code>GET <a href="/firmware/download">/firmware/download</a></code><br>
+                    <small>Download latest firmware binary</small>
+                </div>
+                
+                <div class="endpoint">
+                    <strong>Check for Updates:</strong><br>
+                    <code>GET /firmware/check/{device_version}</code><br>
+                    <small>Check if device needs firmware update</small>
+                </div>
+                
+                <h2>🛠️ ESP32 Integration</h2>
+                <p>Configure your ESP32 devices to check this server for OTA updates:</p>
+                <div class="endpoint">
+                    <code>#define OTA_SERVER_URL "http://your-server:8092"</code>
+                </div>
+                
+                <div class="footer">
+                    <p>Ice Pulse Sensor Firmware OTA Server | Environment: Development</p>
+                </div>
+            </div>
         </body>
         </html>
         EOF
         
         # Requirements per OTA server
         cat > ota-server/requirements.txt << 'EOF'
-        flask==2.3.3
+        flask==3.0.0
         gunicorn==21.2.0
+        requests==2.31.0
         EOF
         
     - name: Create OTA Server Dockerfile
       run: |
         cat > ota-server/Dockerfile << 'EOF'
-        FROM python:3.9-alpine
+        FROM python:3.11-alpine
         
         WORKDIR /app
         
-        # Installa dipendenze
+        # Installa curl per health checks
+        RUN apk add --no-cache curl
+        
+        # Installa dipendenze Python
         COPY requirements.txt .
         RUN pip install --no-cache-dir -r requirements.txt
         
         # Copia applicazione
         COPY . .
+        
+        # Crea directory per firmware se non esiste
+        RUN mkdir -p static/firmware
         
         # Esponi porta
         EXPOSE 5000
@@ -243,7 +326,7 @@ jobs:
           CMD curl -f http://localhost:5000/health || exit 1
         
         # Avvia server
-        CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "app:app"]
+        CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--timeout", "120", "app:app"]
         EOF
         
     - name: Set up Docker Buildx
@@ -317,6 +400,11 @@ jobs:
               interval: 30s
               timeout: 10s
               retries: 3
+            logging:
+              driver: "json-file"
+              options:
+                max-size: "10m"
+                max-file: "3"
               
           watchtower-ota-dev:
             image: containrrr/watchtower
@@ -325,6 +413,11 @@ jobs:
             volumes:
               - /var/run/docker.sock:/var/run/docker.sock
             command: --interval 180 --cleanup ice-pulse-ota-dev
+            logging:
+              driver: "json-file"
+              options:
+                max-size: "10m"
+                max-file: "3"
         EOF
         fi
         
@@ -353,8 +446,9 @@ jobs:
         git commit -m "🔌 Deploy firmware OTA dev: ${{ needs.build.outputs.version }}
 
         - OTA Server: aipioppi/ice-pulse-firmware-ota:${{ needs.build.outputs.version }}
-        - Firmware: ${{ needs.build.outputs.version }}
-        - Size: ${{ needs.build.outputs.firmware_size }} bytes
+        - Firmware Version: ${{ needs.build.outputs.version }}
+        - Firmware Size: ${{ needs.build.outputs.firmware_size }} bytes
+        - ESP-IDF Version: ${{ env.ESP_IDF_VERSION }}
         - Commit: ${{ github.sha }}
         - Actor: ${{ github.actor }}
         - Environment: development"
@@ -377,16 +471,19 @@ jobs:
         echo "- **Firmware Size**: ${{ needs.build.outputs.firmware_size }} bytes" >> $GITHUB_STEP_SUMMARY
         echo "- **ESP-IDF Version**: ${{ env.ESP_IDF_VERSION }}" >> $GITHUB_STEP_SUMMARY
         echo "- **OTA Server**: aipioppi/ice-pulse-firmware-ota:${{ needs.build.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **OTA URL**: ${{ env.OTA_SERVER_URL }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Device Flash**: \`esptool.py write_flash @flash_args\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **OTA URL**: http://localhost:8092" >> $GITHUB_STEP_SUMMARY
+        echo "- **Dashboard**: http://localhost:8092/" >> $GITHUB_STEP_SUMMARY
+        echo "- **Health Check**: http://localhost:8092/health" >> $GITHUB_STEP_SUMMARY
+        echo "- **Firmware Download**: http://localhost:8092/firmware/download" >> $GITHUB_STEP_SUMMARY
         
     - name: Notify Success
       if: needs.deploy.result == 'success'
       run: |
         echo "✅ ESP32 Firmware deployment successful!"
         echo "Version: ${{ needs.build.outputs.version }}"
-        echo "OTA Server: ${{ env.OTA_SERVER_URL }}"
+        echo "OTA Server: http://localhost:8092"
         echo "Firmware size: ${{ needs.build.outputs.firmware_size }} bytes"
+        echo "ESP32 devices can now update to this version automatically"
         
     - name: Notify Failure
       if: needs.deploy.result == 'failure'
