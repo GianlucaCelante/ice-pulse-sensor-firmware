@@ -1,0 +1,32 @@
+idf_component_register(
+    SRCS 
+        "main.c"
+        "sensors/temperature.c"
+        "sensors/humidity.c"
+        "connectivity/wifi_manager.c"
+        "connectivity/http_client.c"
+        "connectivity/ota_update.c"
+        "storage/nvs_manager.c"
+        "storage/data_storage.c"
+        "utils/time_sync.c"
+        "utils/json_utils.c"
+    
+    INCLUDE_DIRS 
+        "."
+        "sensors"
+        "connectivity"
+        "storage"
+        "utils"
+    
+    REQUIRES 
+        nvs_flash
+        esp_wifi
+        esp_http_client
+        esp_https_ota
+        json
+        lwip
+        esp_netif
+        esp_event
+        driver
+        esp_timer
+)

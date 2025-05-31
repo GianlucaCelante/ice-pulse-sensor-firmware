@@ -1,0 +1,69 @@
+# .gitignore - ESP32 Project
+# ESP-IDF build artifacts
+firmware/build/
+firmware/sdkconfig
+firmware/sdkconfig.old
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+.tox
+.coverage
+.pytest_cache/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Environment files
+.env
+.env.*
+config/local/
+
+# Device-specific configs (contain WiFi passwords)
+firmware/main/wifi_config.h
+device-tools/local_config.py
+
+# Build outputs
+ota-server/static/firmware/*.bin
+ota-server/static/firmware/manifest.json
+build/
+dist/
+
+# Test artifacts
+test_results/
+coverage/
+
+# Backup files
+*.bak
+*.backup
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Certificate files
+*.pem
+*.key
+*.crt
+certificates/
+
+# Flash download tool configs
+flash_download_tool.conf
