@@ -36,6 +36,19 @@ jobs:
       uses: actions/checkout@v4
       with:
         submodules: recursive
+        
+    - name: Debug Project Structure
+      run: |
+        echo "=== Project root structure ==="
+        ls -la .
+        echo "=== Looking for firmware directory ==="
+        find . -name "CMakeLists.txt" -type f
+        echo "=== Looking for main directory ==="
+        find . -name "main" -type d
+        if [ -d "firmware" ]; then
+          echo "=== Firmware directory contents ==="
+          ls -la firmware/
+        fi
       
     - name: Get Version
       id: get_version
@@ -58,6 +71,121 @@ jobs:
         esp_idf_version: ${{ env.ESP_IDF_VERSION }}
         target: esp32
         
+    - name: Create Project Structure if Missing
+      run: |
+        echo "=== Setting up ESP32 project structure ==="
+        
+        # Se non esiste firmware/, creala
+        if [ ! -d "firmware" ]; then
+          echo "Creating firmware directory..."
+          mkdir -p firmware
+        fi
+        
+        cd firmware
+        
+        # Crea CMakeLists.txt principale se non esiste
+        if [ ! -f "CMakeLists.txt" ]; then
+          echo "Creating main CMakeLists.txt..."
+          cat > CMakeLists.txt << 'EOF'
+        cmake_minimum_required(VERSION 3.16)
+        
+        # Set project name
+        set(PROJECT_NAME "ice-pulse-sensor")
+        
+        include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+        project(${PROJECT_NAME})
+        EOF
+        fi
+        
+        # Crea directory main/ se non esiste
+        if [ ! -d "main" ]; then
+          echo "Creating main directory..."
+          mkdir -p main
+        fi
+        
+        # Crea CMakeLists.txt per main/ se non esiste
+        if [ ! -f "main/CMakeLists.txt" ]; then
+          echo "Creating main/CMakeLists.txt..."
+          cat > main/CMakeLists.txt << 'EOF'
+        idf_component_register(
+            SRCS "main.c"
+            INCLUDE_DIRS "."
+        )
+        EOF
+        fi
+        
+        # Crea main.c di base se non esiste
+        if [ ! -f "main/main.c" ]; then
+          echo "Creating basic main.c..."
+          cat > main/main.c << 'EOF'
+        #include <stdio.h>
+        #include "freertos/FreeRTOS.h"
+        #include "freertos/task.h"
+        #include "esp_log.h"
+        #include "version.h"
+        
+        static const char *TAG = "ice-pulse";
+        
+        void app_main(void)
+        {
+            ESP_LOGI(TAG, "Ice Pulse Sensor Starting...");
+            ESP_LOGI(TAG, "Firmware Version: %s", FIRMWARE_VERSION);
+            ESP_LOGI(TAG, "Build Timestamp: %s", BUILD_TIMESTAMP);
+            ESP_LOGI(TAG, "Git Commit: %s", GIT_COMMIT);
+            
+            while (1) {
+                ESP_LOGI(TAG, "Ice Pulse Sensor Running...");
+                vTaskDelay(pdMS_TO_TICKS(10000));
+            }
+        }
+        EOF
+        fi
+        
+        # Crea sdkconfig.defaults se non esiste
+        if [ ! -f "sdkconfig.defaults" ]; then
+          echo "Creating sdkconfig.defaults..."
+          cat > sdkconfig.defaults << 'EOF'
+        # Ice Pulse Sensor Configuration
+        CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+        CONFIG_PARTITION_TABLE_CUSTOM=y
+        CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+        CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+        CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+        
+        # WiFi Configuration
+        CONFIG_ESP32_WIFI_STATIC_RX_BUFFER_NUM=10
+        CONFIG_ESP32_WIFI_DYNAMIC_RX_BUFFER_NUM=32
+        CONFIG_ESP32_WIFI_TX_BUFFER_TYPE_DYNAMIC=y
+        CONFIG_ESP32_WIFI_DYNAMIC_TX_BUFFER_NUM=32
+        
+        # Logging
+        CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+        CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
+        
+        # OTA Configuration
+        CONFIG_OTA_ALLOW_HTTP=y
+        EOF
+        fi
+        
+        # Crea partitions.csv se non esiste
+        if [ ! -f "partitions.csv" ]; then
+          echo "Creating partitions.csv..."
+          cat > partitions.csv << 'EOF'
+        # Name,   Type, SubType, Offset,  Size, Flags
+        nvs,      data, nvs,     0x9000,  0x6000,
+        phy_init, data, phy,     0xf000,  0x1000,
+        factory,  app,  factory, 0x10000, 1M,
+        ota_0,    app,  ota_0,   0x110000,1M,
+        ota_1,    app,  ota_1,   0x210000,1M,
+        ota_data, data, ota,     0x310000,0x2000,
+        storage,  data, spiffs,  0x312000,0xEE000,
+        EOF
+        fi
+        
+        echo "=== Project structure created ==="
+        ls -la .
+        ls -la main/
+        
     - name: Build Firmware
       run: |
         echo "=== Building ESP32 firmware ==="
@@ -74,6 +202,11 @@ jobs:
         #endif
         EOF
         
+        # Verifica struttura prima del build
+        echo "=== Pre-build verification ==="
+        ls -la .
+        cat CMakeLists.txt
+        
         # Build del firmware
         idf.py set-target esp32
         idf.py build
@@ -86,14 +219,30 @@ jobs:
       run: |
         cd firmware
         
+        # Determina il nome del file binario
+        BINARY_NAME="ice-pulse-sensor.bin"
+        if [ ! -f "build/$BINARY_NAME" ]; then
+          # Cerca il file .bin nel build
+          BINARY_NAME=$(find build/ -name "*.bin" -not -path "*/bootloader/*" -not -path "*/partition_table/*" | head -1 | xargs basename)
+          if [ -z "$BINARY_NAME" ]; then
+            echo "No firmware binary found!"
+            ls -la build/
+            exit 1
+          fi
+        fi
+        
+        echo "Found firmware binary: $BINARY_NAME"
+        
         # Informazioni sul firmware
-        FIRMWARE_SIZE=$(stat -c%s build/ice-pulse-sensor.bin)
+        FIRMWARE_SIZE=$(stat -c%s build/$BINARY_NAME)
         BOOTLOADER_SIZE=$(stat -c%s build/bootloader/bootloader.bin)
         
         echo "firmware_size=$FIRMWARE_SIZE" >> $GITHUB_OUTPUT
         echo "bootloader_size=$BOOTLOADER_SIZE" >> $GITHUB_OUTPUT
+        echo "binary_name=$BINARY_NAME" >> $GITHUB_OUTPUT
         
         echo "=== Firmware Build Summary ==="
+        echo "Firmware binary: $BINARY_NAME"
         echo "Firmware size: $FIRMWARE_SIZE bytes"
         echo "Bootloader size: $BOOTLOADER_SIZE bytes"
         echo "Version: ${{ steps.get_version.outputs.version }}"
@@ -103,8 +252,10 @@ jobs:
         cd firmware
         mkdir -p ../ota-package
         
+        BINARY_NAME="${{ steps.build_info.outputs.binary_name }}"
+        
         # Copia i file necessari per OTA
-        cp build/ice-pulse-sensor.bin ../ota-package/firmware.bin
+        cp build/$BINARY_NAME ../ota-package/firmware.bin
         cp build/bootloader/bootloader.bin ../ota-package/
         cp build/partition_table/partition-table.bin ../ota-package/
         
@@ -119,7 +270,8 @@ jobs:
           "idf_version": "${{ env.ESP_IDF_VERSION }}",
           "commit": "${{ github.sha }}",
           "branch": "${{ github.ref_name }}",
-          "environment": "development"
+          "environment": "development",
+          "binary_name": "$BINARY_NAME"
         }
         EOF
         
@@ -355,7 +507,6 @@ jobs:
     needs: [build, package]
     
     steps:
-    # ✅ AGGIUNGI setup SSH key
     - name: Setup SSH Key
       uses: webfactory/ssh-agent@v0.8.0
       with:
@@ -364,7 +515,7 @@ jobs:
     - name: Clone Infrastructure Repository
       run: |
         echo "=== Cloning infra repository with SSH ==="
-        git clone ${{ env.INFRA_REPO_URL }} infra-repo  # ✅ Usa SSH
+        git clone ${{ env.INFRA_REPO_URL }} infra-repo
         cd infra-repo
         git checkout ${{ env.INFRA_BRANCH }}
         
