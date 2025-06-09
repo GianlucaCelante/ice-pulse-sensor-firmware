@@ -355,10 +355,16 @@ jobs:
     needs: [build, package]
     
     steps:
+    # ✅ AGGIUNGI setup SSH key
+    - name: Setup SSH Key
+      uses: webfactory/ssh-agent@v0.8.0
+      with:
+        ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+        
     - name: Clone Infrastructure Repository
       run: |
-        echo "=== Cloning infra repository ==="
-        git clone https://${{ secrets.GITHUB_TOKEN }}@github.com/GianlucaCelante/ice-pulse-infra.git infra-repo
+        echo "=== Cloning infra repository with SSH ==="
+        git clone ${{ env.INFRA_REPO_URL }} infra-repo  # ✅ Usa SSH
         cd infra-repo
         git checkout ${{ env.INFRA_BRANCH }}
         
@@ -453,8 +459,8 @@ jobs:
         - Actor: ${{ github.actor }}
         - Environment: development"
         
-        echo "=== Pushing to remote ==="
-        git push https://${{ secrets.GITHUB_TOKEN }}@github.com/GianlucaCelante/ice-pulse-infra.git ${{ env.INFRA_BRANCH }}
+        echo "=== Pushing to remote with SSH ==="
+        git push origin ${{ env.INFRA_BRANCH }}
 
   notify:
     name: Notify Firmware Deployment
