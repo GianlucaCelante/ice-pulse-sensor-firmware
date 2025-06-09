@@ -70,6 +70,7 @@ jobs:
       with:
         esp_idf_version: ${{ env.ESP_IDF_VERSION }}
         target: esp32
+        path: 'firmware'
         
     - name: Create Project Structure if Missing
       run: |
