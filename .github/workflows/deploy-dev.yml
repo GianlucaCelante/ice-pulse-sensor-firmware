@@ -62,7 +62,7 @@ jobs:
       run: |
         echo "=== Building ESP32 firmware ==="
         cd firmware
-        
+
         # Aggiorna version.h con versione corrente
         cat > main/version.h << EOF
         #ifndef VERSION_H
