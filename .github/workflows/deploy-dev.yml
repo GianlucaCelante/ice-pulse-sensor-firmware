@@ -1,4 +1,4 @@
-# .github/workflows/deploy-dev.yml - ESP32 Development 
+# .github/workflows/deploy-dev.yml - ESP32 Development
 name: Deploy Firmware to Development
 
 on:
@@ -37,18 +37,36 @@ jobs:
       with:
         submodules: recursive
         
-    - name: Debug Project Structure
+    - name: Fix Missing Components Directory
       run: |
-        echo "=== Project root structure ==="
-        ls -la .
-        echo "=== Looking for firmware directory ==="
-        find . -name "CMakeLists.txt" -type f
-        echo "=== Looking for main directory ==="
-        find . -name "main" -type d
-        if [ -d "firmware" ]; then
-          echo "=== Firmware directory contents ==="
-          ls -la firmware/
-        fi
+        # Create components directory if it doesn't exist
+        mkdir -p firmware/components
+        
+        # Simplify main CMakeLists.txt to only include existing files
+        cat > firmware/main/CMakeLists.txt << 'EOF'
+        idf_component_register(
+            SRCS 
+                "Main.c"
+            
+            INCLUDE_DIRS 
+                "."
+            
+            REQUIRES 
+                nvs_flash
+                esp_wifi
+                esp_http_client
+                esp_https_ota
+                json
+                lwip
+                esp_netif
+                esp_event
+                driver
+                esp_timer
+        )
+        EOF
+        
+        echo "Fixed CMakeLists.txt to match existing files"
+        ls -la firmware/main/
       
     - name: Get Version
       id: get_version
