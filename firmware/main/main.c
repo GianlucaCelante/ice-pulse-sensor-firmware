@@ -11,7 +11,7 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "nvs_flash.h"
-#include "esp_timer.h"  // Aggiunto per esp_timer_get_time
+#include "esp_timer.h"
 
 #include "version.h"
 #include "config.h"

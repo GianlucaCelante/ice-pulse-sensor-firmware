@@ -14,9 +14,6 @@ idf_component_register(
     INCLUDE_DIRS 
         "."
         "sensors"
-        "connectivity"
-        "storage"
-        "utils"
     
     REQUIRES 
         nvs_flash
