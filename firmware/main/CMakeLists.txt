@@ -1,15 +1,6 @@
 idf_component_register(
     SRCS 
         "main.c"
-        "sensors/temperature.c"
-        "sensors/humidity.c"
-        "connectivity/wifi_manager.c"
-        "connectivity/http_client.c"
-        "connectivity/ota_update.c"
-        "storage/nvs_manager.c"
-        "storage/data_storage.c"
-        "utils/time_sync.c"
-        "utils/json_utils.c"
     
     INCLUDE_DIRS 
         "."
