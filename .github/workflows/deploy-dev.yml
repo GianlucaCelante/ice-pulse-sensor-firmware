@@ -313,9 +313,11 @@ jobs:
         ls -la main/
         
     - name: Build Firmware
+      working-directory: firmware
       run: |
         echo "=== Building ESP32 firmware ==="
-        cd firmware
+        echo "Current directory: $(pwd)"
+        ls -la .
 
         # Aggiorna version.h con versione corrente
         cat > main/version.h << EOF
@@ -327,11 +329,6 @@ jobs:
         #define BUILD_NUMBER "${{ github.run_number }}"
         #endif
         EOF
-        
-        # Verifica struttura prima del build
-        echo "=== Pre-build verification ==="
-        ls -la .
-        cat CMakeLists.txt
         
         # Build del firmware
         idf.py set-target esp32
