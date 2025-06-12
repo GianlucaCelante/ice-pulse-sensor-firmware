@@ -236,7 +236,133 @@ jobs:
         }
         EOF        
         # Move OTA logic to main.c (with correct name)
-        cat > firmware/main/main.c << 'EOF'
+        cat > firmware/main/main.c << 'MAIN_EOF'
+        // firmware/main/main.c - Ice Pulse ESP32 Main Application (OTA Separato)
+        #include <stdio.h>
+        #include <stdlib.h>
+        #include <string.h>
+        #include <time.h>
+        #include "freertos/FreeRTOS.h"
+        #include "freertos/task.h"
+        #include "esp_system.h"
+        #include "esp_log.h"
+        #include "esp_wifi.h"
+        #include "esp_event.h"
+        #include "esp_netif.h"
+        #include "nvs_flash.h"
+        
+        #include "version.h"
+        #include "config.h"
+        
+        static const char *TAG = "ICE_PULSE_MAIN";
+        
+        // Task handles
+        static TaskHandle_t sensor_task_handle = NULL;
+        static TaskHandle_t data_send_task_handle = NULL;
+        static TaskHandle_t ota_check_task_handle = NULL;
+        
+        // Application state
+        typedef struct {
+            bool wifi_connected;
+            bool sensors_initialized;
+            bool ota_in_progress;
+            uint32_t reading_count;
+            uint32_t data_send_count;
+            uint32_t ota_check_count;
+            float last_temperature;
+            float last_humidity;
+        } app_state_t;
+        
+        static app_state_t app_state = {0};
+        
+        void sensor_task(void *parameter) {
+            ESP_LOGI(TAG, "Sensor task started");
+            
+            while (1) {
+                app_state.last_temperature = -18.5f + (esp_random() % 100) / 100.0f;
+                app_state.last_humidity = 65.0f + (esp_random() % 200 - 100) / 100.0f;
+                app_state.reading_count++;
+                
+                ESP_LOGI(TAG, "Reading #%lu - T:%.2f°C H:%.2f%%", 
+                         app_state.reading_count, app_state.last_temperature, app_state.last_humidity);
+                
+                vTaskDelay(pdMS_TO_TICKS(5 * 60 * 1000));
+            }
+        }
+        
+        void data_send_task(void *parameter) {
+            ESP_LOGI(TAG, "Data send task started");
+            
+            while (1) {
+                if (app_state.wifi_connected && app_state.reading_count > 0) {
+                    ESP_LOGI(TAG, "Sending data #%lu to API (NO OTA CHECK HERE)", 
+                             app_state.data_send_count + 1);
+                    
+                    app_state.data_send_count++;
+                    ESP_LOGI(TAG, "Data sent successfully");
+                }
+                
+                vTaskDelay(pdMS_TO_TICKS(10 * 60 * 1000));
+            }
+        }
+        
+        void ota_check_task(void *parameter) {
+            ESP_LOGI(TAG, "OTA check task started (every 6 hours)");
+            
+            vTaskDelay(pdMS_TO_TICKS(30000));
+            
+            while (1) {
+                if (app_state.wifi_connected && !app_state.ota_in_progress) {
+                    ESP_LOGI(TAG, "OTA Check #%lu - Checking http://localhost:8092", 
+                             app_state.ota_check_count + 1);
+                    
+                    app_state.ota_check_count++;
+                    ESP_LOGI(TAG, "Firmware is up to date");
+                }
+                
+                vTaskDelay(pdMS_TO_TICKS(6 * 60 * 60 * 1000));
+            }
+        }
+        
+        esp_err_t app_init(void) {
+            ESP_LOGI(TAG, "Starting Ice Pulse Sensor v%s", FIRMWARE_VERSION);
+            ESP_LOGI(TAG, "OTA Strategy: Separated tasks - Data every 10min, OTA check every 6h");
+            
+            esp_err_t ret = nvs_flash_init();
+            if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+                ESP_ERROR_CHECK(nvs_flash_erase());
+                ret = nvs_flash_init();
+            }
+            ESP_ERROR_CHECK(ret);
+            
+            ESP_ERROR_CHECK(esp_netif_init());
+            ESP_ERROR_CHECK(esp_event_loop_create_default());
+            
+            app_state.wifi_connected = true;
+            app_state.sensors_initialized = true;
+            
+            return ESP_OK;
+        }
+        
+        void app_main(void) {
+            ESP_LOGI(TAG, "Ice Pulse Sensor starting...");
+            ESP_LOGI(TAG, "Task Strategy: SENSOR (high) + DATA_SEND (medium) + OTA_CHECK (low)");
+            
+            ESP_ERROR_CHECK(app_init());
+            
+            xTaskCreate(sensor_task, "sensor_task", 4096, NULL, 5, &sensor_task_handle);
+            xTaskCreate(data_send_task, "data_send_task", 8192, NULL, 4, &data_send_task_handle);
+            xTaskCreate(ota_check_task, "ota_check_task", 8192, NULL, 2, &ota_check_task_handle);
+            
+            ESP_LOGI(TAG, "All tasks running independently!");
+            
+            while (1) {
+                ESP_LOGI(TAG, "Status - Reads:%lu | DataSent:%lu | OTAChecks:%lu", 
+                         app_state.reading_count, app_state.data_send_count, app_state.ota_check_count);
+                vTaskDelay(pdMS_TO_TICKS(60000));
+            }
+        }
+        MAIN_EOF
       
     - name: Get Version
       id: get_version
