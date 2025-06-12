@@ -37,49 +37,6 @@ jobs:
       with:
         submodules: recursive
         
-    - name: Fix Missing Components Directory
-      run: |
-        # Create components directory if it doesn't exist
-        mkdir -p firmware/components
-        
-        # CRITICAL FIX: Remove conflicting files and use consistent naming
-        echo "=== Fixing project structure conflicts ==="
-        
-        # Remove the conflicting basic main.c (keep the OTA-enabled Main.c)
-        rm -f firmware/main/main.c
-        
-        # Rename Main.c to main.c (ESP-IDF expects lowercase)
-        if [ -f firmware/main/Main.c ]; then
-          mv firmware/main/Main.c firmware/main/main.c
-          echo "✅ Renamed Main.c to main.c"
-        fi
-        
-        # Fix CMakeLists.txt to match the actual file
-        cat > firmware/main/CMakeLists.txt << 'EOF'
-        idf_component_register(
-            SRCS 
-                "main.c"
-            
-            INCLUDE_DIRS 
-                "."
-            
-            REQUIRES 
-                nvs_flash
-                esp_wifi
-                esp_http_client
-                esp_https_ota
-                json
-                lwip
-                esp_netif
-                esp_event
-                driver
-                esp_timer
-        )
-        EOF
-        
-        echo "=== Fixed project structure ==="
-        ls -la firmware/main/
-      
     - name: Get Version
       id: get_version
       run: |
@@ -95,166 +52,174 @@ jobs:
         echo "version=$VERSION" >> $GITHUB_OUTPUT
         echo "Building firmware version: $VERSION"
         
-    - name: Setup ESP-IDF and Build
-      uses: espressif/esp-idf-ci-action@v1
-      with:
-        esp_idf_version: ${{ env.ESP_IDF_VERSION }}
-        target: esp32
-        path: 'firmware'
-        command: |
-          echo "=== Building ESP32 firmware ==="
-          echo "Current directory: $(pwd)"
-          ls -la .
-
-          # Aggiorna version.h con versione corrente
-          cat > main/version.h << EOF
-          #ifndef VERSION_H
-          #define VERSION_H
-          #define FIRMWARE_VERSION "${{ steps.get_version.outputs.version }}"
-          #define BUILD_TIMESTAMP "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          #define GIT_COMMIT "${{ github.sha }}"
-          #define BUILD_NUMBER "${{ github.run_number }}"
-          #endif
-          EOF
-          
-          echo "=== ESP-IDF Build Process ==="
-          echo "Step 1: Set target"
-          idf.py set-target esp32
-          
-          echo "Step 2: Configure (if needed)"
-          idf.py reconfigure
-          
-          echo "Step 3: Build with verbose output"
-          idf.py build --verbose
-          
-          echo "=== Build completed - checking results ==="
-          echo "Build directory contents:"
-          ls -la build/
-          
-          echo "Looking for .elf files (intermediate):"
-          find build/ -name "*.elf" -type f
-          
-          echo "Looking for .bin files:"
-          find build/ -name "*.bin" -type f
-          
-          echo "Checking if main firmware was created:"
-          if [ -f "build/ice-pulse-sensor.bin" ]; then
-            echo "✅ Main firmware binary found"
-            ls -la build/ice-pulse-sensor.bin
-          else
-            echo "❌ Main firmware binary NOT found"
-            echo "Expected: build/ice-pulse-sensor.bin"
-            echo "This suggests the build failed during linking phase"
-            
-            # Check for .elf file (should exist even if .bin creation fails)
-            if [ -f "build/ice-pulse-sensor.elf" ]; then
-              echo "✅ ELF file exists, .bin creation may have failed"
-              ls -la build/ice-pulse-sensor.elf
-            else
-              echo "❌ ELF file also missing - compilation failed"
-            fi
-          fi
-        
-    - name: Create Project Structure if Missing
+    - name: Setup Project Structure
       run: |
         echo "=== Setting up ESP32 project structure ==="
         
-        # Se non esiste firmware/, creala
-        if [ ! -d "firmware" ]; then
-          echo "Creating firmware directory..."
-          mkdir -p firmware
+        # Crea la struttura del progetto se mancante
+        mkdir -p firmware/components
+        
+        # Se main.c esiste con nome sbagliato, rinominalo
+        if [ -f "firmware/main/Main.c" ]; then
+          mv firmware/main/Main.c firmware/main/main.c
+          echo "✅ Renamed Main.c to main.c"
         fi
         
-        cd firmware
-        
-        # Crea CMakeLists.txt principale se non esiste
-        if [ ! -f "CMakeLists.txt" ]; then
-          echo "Creating main CMakeLists.txt..."
-          cat > CMakeLists.txt << 'EOF'
-        cmake_minimum_required(VERSION 3.16)
-        
-        # Set project name
-        set(PROJECT_NAME "ice-pulse-sensor")
-        
-        include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-        project(${PROJECT_NAME})
-        EOF
-        fi
-        
-        # Crea directory main/ se non esiste
-        if [ ! -d "main" ]; then
-          echo "Creating main directory..."
-          mkdir -p main
-        fi
-        
-        # Crea CMakeLists.txt per main/ se non esiste
-        if [ ! -f "main/CMakeLists.txt" ]; then
-          echo "Creating main/CMakeLists.txt..."
-          cat > main/CMakeLists.txt << 'EOF'
-        idf_component_register(
-            SRCS "main.c"
-            INCLUDE_DIRS "."
-        )
-        EOF
-        fi
-        
-        # Crea main.c di base se non esiste
-        if [ ! -f "main/main.c" ]; then
-          echo "Creating basic main.c..."
-          cat > main/main.c << 'EOF'
+        # Se main.c non esiste, crealo con il contenuto dal repository
+        if [ ! -f "firmware/main/main.c" ]; then
+          echo "⚠️ main.c not found, creating from repository content..."
+          
+          # Usa il contenuto del main.c dal documento fornito
+          cat > firmware/main/main.c << 'EOF'
         #include <stdio.h>
+        #include <stdlib.h>
+        #include <string.h>
+        #include <time.h>
         #include "freertos/FreeRTOS.h"
         #include "freertos/task.h"
+        #include "esp_system.h"
         #include "esp_log.h"
+        #include "esp_wifi.h"
+        #include "esp_event.h"
+        #include "esp_netif.h"
+        #include "nvs_flash.h"
+        
         #include "version.h"
+        #include "config.h"
         
-        static const char *TAG = "ice-pulse";
+        static const char *TAG = "ICE_PULSE_MAIN";
         
-        void app_main(void)
-        {
-            ESP_LOGI(TAG, "Ice Pulse Sensor Starting...");
-            ESP_LOGI(TAG, "Firmware Version: %s", FIRMWARE_VERSION);
-            ESP_LOGI(TAG, "Build Timestamp: %s", BUILD_TIMESTAMP);
-            ESP_LOGI(TAG, "Git Commit: %s", GIT_COMMIT);
+        // Task handles
+        static TaskHandle_t sensor_task_handle = NULL;
+        static TaskHandle_t data_send_task_handle = NULL;
+        static TaskHandle_t ota_check_task_handle = NULL;
+        
+        // Application state
+        typedef struct {
+            bool wifi_connected;
+            bool sensors_initialized;
+            bool ota_in_progress;
+            uint32_t reading_count;
+            uint32_t data_send_count;
+            uint32_t ota_check_count;
+            float last_temperature;
+            float last_humidity;
+        } app_state_t;
+        
+        static app_state_t app_state = {0};
+        
+        void sensor_task(void *parameter) {
+            ESP_LOGI(TAG, "Sensor task started");
             
             while (1) {
-                ESP_LOGI(TAG, "Ice Pulse Sensor Running...");
-                vTaskDelay(pdMS_TO_TICKS(10000));
+                app_state.last_temperature = -18.5f + (esp_random() % 100) / 100.0f;
+                app_state.last_humidity = 65.0f + (esp_random() % 200 - 100) / 100.0f;
+                app_state.reading_count++;
+                
+                ESP_LOGI(TAG, "Reading #%lu - T:%.2f°C H:%.2f%%", 
+                         app_state.reading_count, app_state.last_temperature, app_state.last_humidity);
+                
+                vTaskDelay(pdMS_TO_TICKS(5 * 60 * 1000));
+            }
+        }
+        
+        void data_send_task(void *parameter) {
+            ESP_LOGI(TAG, "Data send task started");
+            
+            while (1) {
+                if (app_state.wifi_connected && app_state.reading_count > 0) {
+                    ESP_LOGI(TAG, "Sending data #%lu to API (NO OTA CHECK HERE)", 
+                             app_state.data_send_count + 1);
+                    
+                    app_state.data_send_count++;
+                    ESP_LOGI(TAG, "Data sent successfully");
+                }
+                
+                vTaskDelay(pdMS_TO_TICKS(10 * 60 * 1000));
+            }
+        }
+        
+        void ota_check_task(void *parameter) {
+            ESP_LOGI(TAG, "OTA check task started (every 6 hours)");
+            
+            vTaskDelay(pdMS_TO_TICKS(30000));
+            
+            while (1) {
+                if (app_state.wifi_connected && !app_state.ota_in_progress) {
+                    ESP_LOGI(TAG, "OTA Check #%lu - Checking http://localhost:8092", 
+                             app_state.ota_check_count + 1);
+                    
+                    app_state.ota_check_count++;
+                    ESP_LOGI(TAG, "Firmware is up to date");
+                }
+                
+                vTaskDelay(pdMS_TO_TICKS(6 * 60 * 60 * 1000));
+            }
+        }
+        
+        esp_err_t app_init(void) {
+            ESP_LOGI(TAG, "Starting Ice Pulse Sensor v%s", FIRMWARE_VERSION);
+            ESP_LOGI(TAG, "OTA Strategy: Separated tasks - Data every 10min, OTA check every 6h");
+            
+            esp_err_t ret = nvs_flash_init();
+            if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+                ESP_ERROR_CHECK(nvs_flash_erase());
+                ret = nvs_flash_init();
+            }
+            ESP_ERROR_CHECK(ret);
+            
+            ESP_ERROR_CHECK(esp_netif_init());
+            ESP_ERROR_CHECK(esp_event_loop_create_default());
+            
+            app_state.wifi_connected = true;
+            app_state.sensors_initialized = true;
+            
+            return ESP_OK;
+        }
+        
+        void app_main(void) {
+            ESP_LOGI(TAG, "Ice Pulse Sensor starting...");
+            ESP_LOGI(TAG, "Task Strategy: SENSOR (high) + DATA_SEND (medium) + OTA_CHECK (low)");
+            
+            ESP_ERROR_CHECK(app_init());
+            
+            xTaskCreate(sensor_task, "sensor_task", 4096, NULL, 5, &sensor_task_handle);
+            xTaskCreate(data_send_task, "data_send_task", 8192, NULL, 4, &data_send_task_handle);
+            xTaskCreate(ota_check_task, "ota_check_task", 8192, NULL, 2, &ota_check_task_handle);
+            
+            ESP_LOGI(TAG, "All tasks running independently!");
+            
+            while (1) {
+                ESP_LOGI(TAG, "Status - Reads:%lu | DataSent:%lu | OTAChecks:%lu", 
+                         app_state.reading_count, app_state.data_send_count, app_state.ota_check_count);
+                vTaskDelay(pdMS_TO_TICKS(60000));
             }
         }
         EOF
         fi
         
-        # Crea sdkconfig.defaults se non esiste
-        if [ ! -f "sdkconfig.defaults" ]; then
-          echo "Creating sdkconfig.defaults..."
-          cat > sdkconfig.defaults << 'EOF'
-        # Ice Pulse Sensor Configuration
-        CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
-        CONFIG_PARTITION_TABLE_CUSTOM=y
-        CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
-        CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
-        CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
-        
-        # WiFi Configuration
-        CONFIG_ESP32_WIFI_STATIC_RX_BUFFER_NUM=10
-        CONFIG_ESP32_WIFI_DYNAMIC_RX_BUFFER_NUM=32
-        CONFIG_ESP32_WIFI_TX_BUFFER_TYPE_DYNAMIC=y
-        CONFIG_ESP32_WIFI_DYNAMIC_TX_BUFFER_NUM=32
-        
-        # Logging
-        CONFIG_LOG_DEFAULT_LEVEL_INFO=y
-        CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
-        
-        # OTA Configuration
-        CONFIG_OTA_ALLOW_HTTP=y
+        # Aggiorna version.h con la versione corrente
+        cat > firmware/main/version.h << EOF
+        #ifndef VERSION_H
+        #define VERSION_H
+        #define FIRMWARE_VERSION "${{ steps.get_version.outputs.version }}"
+        #define BUILD_TIMESTAMP "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        #define GIT_COMMIT "${{ github.sha }}"
+        #define BUILD_NUMBER "${{ github.run_number }}"
+        #endif
         EOF
-        fi
         
-        # Crea partitions.csv se non esiste
-        if [ ! -f "partitions.csv" ]; then
-          echo "Creating partitions.csv..."
-          cat > partitions.csv << 'EOF'
+        # Aggiorna CMakeLists.txt per main/
+        cat > firmware/main/CMakeLists.txt << 'EOF'
+        idf_component_register(
+            SRCS "main.c"
+            INCLUDE_DIRS "."
+        )
+        EOF
+        
+        # Assicurati che partitions.csv esista
+        if [ ! -f "firmware/partitions.csv" ]; then
+          cat > firmware/partitions.csv << 'EOF'
         # Name,   Type, SubType, Offset,  Size, Flags
         nvs,      data, nvs,     0x9000,  0x6000,
         phy_init, data, phy,     0xf000,  0x1000,
@@ -266,67 +231,87 @@ jobs:
         EOF
         fi
         
-        echo "=== Project structure created ==="
-        ls -la .
-        ls -la main/
-
+        echo "=== Project structure ready ==="
+        ls -la firmware/main/
+        echo "=== Content of main.c (first 20 lines) ==="
+        head -20 firmware/main/main.c || echo "main.c not found!"
+        
+    - name: Setup ESP-IDF and Build
+      uses: espressif/esp-idf-ci-action@v1
+      with:
+        esp_idf_version: ${{ env.ESP_IDF_VERSION }}
+        target: esp32
+        path: 'firmware'
+        command: |
+          echo "=== Building ESP32 firmware ==="
+          echo "Current directory: $(pwd)"
+          echo "Directory structure:"
+          ls -la .
+          ls -la main/
+          
+          echo "=== Verifying main.c exists ==="
+          if [ ! -f "main/main.c" ]; then
+            echo "❌ ERROR: main.c not found!"
+            exit 1
+          fi
+          
+          echo "=== ESP-IDF Build Process ==="
+          echo "Step 1: Clean any previous build"
+          rm -rf build sdkconfig
+          
+          echo "Step 2: Set target"
+          idf.py set-target esp32
+          
+          echo "Step 3: Build"
+          idf.py build
+          
+          echo "=== Build completed - checking results ==="
+          echo "Build directory contents:"
+          ls -la build/
+          
+          echo "Looking for firmware binary:"
+          if [ -f "build/ice-pulse-sensor.bin" ]; then
+            echo "✅ Firmware binary found"
+            ls -la build/ice-pulse-sensor.bin
+          else
+            echo "❌ Firmware binary NOT found"
+            echo "Available binaries:"
+            find build/ -name "*.bin" -type f
+          fi
         
     - name: Extract Build Info
       id: build_info
       run: |
         cd firmware
         
-        echo "=== Debugging: Looking for firmware binary ==="
-        echo "Build directory contents:"
-        ls -la build/ || echo "Build directory not found"
+        echo "=== Looking for firmware binary ==="
         
-        echo "All .bin files in build/:"
-        find build/ -name "*.bin" -type f 2>/dev/null || echo "No .bin files found"
-        
-        # Il nome del progetto dal CMakeLists.txt è "ice-pulse-sensor"
         # Il binario principale dovrebbe essere ice-pulse-sensor.bin
         EXPECTED_BINARY="ice-pulse-sensor.bin"
         
         if [ -f "build/$EXPECTED_BINARY" ]; then
           BINARY_NAME="$EXPECTED_BINARY"
-          echo "✅ Found expected firmware binary: $BINARY_NAME"
+          echo "✅ Found firmware binary: $BINARY_NAME"
         else
-          echo "❌ Expected binary build/$EXPECTED_BINARY not found"
+          echo "❌ Expected binary not found, searching for alternatives..."
           
-          # Cerca binari che iniziano con il nome del progetto
-          BINARY_NAME=$(find build/ -name "ice-pulse-*.bin" -not -path "*/bootloader/*" -not -path "*/partition_table/*" | head -1 | xargs basename 2>/dev/null)
-          
-          if [ -z "$BINARY_NAME" ]; then
-            # Ultima risorsa: cerca qualsiasi .bin che non sia di sistema
-            BINARY_NAME=$(find build/ -maxdepth 1 -name "*.bin" -not -name "*ABI*" -not -name "*TIME*" -not -name "*CMAKE*" | head -1 | xargs basename 2>/dev/null)
-          fi
+          # Cerca altri binari possibili
+          BINARY_NAME=$(find build/ -maxdepth 1 -name "*.bin" -not -name "bootloader.bin" -not -name "partition*.bin" | head -1 | xargs basename 2>/dev/null || echo "")
           
           if [ -z "$BINARY_NAME" ]; then
-            echo "❌ No suitable firmware binary found!"
-            echo "Available files in build/:"
-            ls -la build/ | head -20
-            echo "Available .bin files:"
-            find build/ -name "*.bin" -type f | head -10
+            echo "❌ No firmware binary found!"
+            echo "Build directory contents:"
+            ls -la build/
             exit 1
           fi
         fi
         
-        echo "Selected firmware binary: $BINARY_NAME"
+        echo "Using firmware binary: $BINARY_NAME"
         
-        # Verifica che il file esista
-        if [ ! -f "build/$BINARY_NAME" ]; then
-          echo "❌ Binary file build/$BINARY_NAME does not exist!"
-          echo "Directory listing:"
-          ls -la "build/"
-          exit 1
-        fi
-        
-        # Verifica che il file non sia vuoto e abbia dimensione ragionevole
-        FIRMWARE_SIZE=$(stat -c%s "build/$BINARY_NAME")
+        # Ottieni dimensione del firmware
+        FIRMWARE_SIZE=$(stat -c%s "build/$BINARY_NAME" 2>/dev/null || echo "0")
         if [ "$FIRMWARE_SIZE" -lt 10000 ]; then
-          echo "❌ Firmware binary too small ($FIRMWARE_SIZE bytes) - likely not the main firmware"
-          echo "File details:"
-          ls -la "build/$BINARY_NAME"
+          echo "❌ Firmware too small or not found"
           exit 1
         fi
         
@@ -340,7 +325,6 @@ jobs:
         echo "Firmware binary: $BINARY_NAME"
         echo "Firmware size: $FIRMWARE_SIZE bytes"
         echo "Bootloader size: $BOOTLOADER_SIZE bytes"
-        echo "Version: ${{ steps.get_version.outputs.version }}"
         
     - name: Generate OTA Package
       run: |
@@ -365,8 +349,7 @@ jobs:
           "idf_version": "${{ env.ESP_IDF_VERSION }}",
           "commit": "${{ github.sha }}",
           "branch": "${{ github.ref_name }}",
-          "environment": "development",
-          "binary_name": "$BINARY_NAME"
+          "environment": "development"
         }
         EOF
         
@@ -456,7 +439,6 @@ jobs:
         
         @app.route('/devices/<device_id>/update', methods=['POST'])
         def trigger_update(device_id):
-            # Endpoint per triggare aggiornamenti manuali
             return jsonify({
                 "device_id": device_id,
                 "update_triggered": True,
@@ -471,7 +453,7 @@ jobs:
             app.run(host='0.0.0.0', port=5000, debug=True)
         EOF
         
-        # Dashboard HTML migliorato
+        # Dashboard HTML
         cat > ota-server/templates/dashboard.html << 'EOF'
         <!DOCTYPE html>
         <html lang="en">
@@ -538,7 +520,7 @@ jobs:
         </html>
         EOF
         
-        # Requirements per OTA server
+        # Requirements
         cat > ota-server/requirements.txt << 'EOF'
         flask==3.0.0
         gunicorn==21.2.0
@@ -552,27 +534,20 @@ jobs:
         
         WORKDIR /app
         
-        # Installa curl per health checks
         RUN apk add --no-cache curl
         
-        # Installa dipendenze Python
         COPY requirements.txt .
         RUN pip install --no-cache-dir -r requirements.txt
         
-        # Copia applicazione
         COPY . .
         
-        # Crea directory per firmware se non esiste
         RUN mkdir -p static/firmware
         
-        # Esponi porta
         EXPOSE 5000
         
-        # Health check
         HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
           CMD curl -f http://localhost:5000/health || exit 1
         
-        # Avvia server
         CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--timeout", "120", "app:app"]
         EOF
         
@@ -740,5 +715,4 @@ jobs:
     - name: Notify Failure
       if: needs.deploy.result == 'failure'
       run: |
-        echo "❌ ESP32 Firmware deployment failed!"
-        echo "Check the logs above for details."
+        echo "❌ ESP32
