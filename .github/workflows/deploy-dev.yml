@@ -43,162 +43,14 @@ jobs:
         if [ -n "${{ github.event.inputs.version_override }}" ]; then
           VERSION="${{ github.event.inputs.version_override }}"
         else
-          if [ -f VERSION ]; then
-            VERSION=$(cat VERSION | tr -d '\n\r' | xargs)
-          else
-            VERSION="fw-$(date +%Y%m%d%H%M%S)-${GITHUB_SHA:0:7}"
-          fi
+          VERSION=$(cat VERSION | tr -d '\n\r' | xargs)
         fi
         echo "version=$VERSION" >> $GITHUB_OUTPUT
         echo "Building firmware version: $VERSION"
         
-    - name: Setup Project Structure
+    - name: Update version.h
       run: |
-        echo "=== Setting up ESP32 project structure ==="
-        
-        # Crea la struttura del progetto se mancante
-        mkdir -p firmware/components
-        
-        # Se main.c esiste con nome sbagliato, rinominalo
-        if [ -f "firmware/main/Main.c" ]; then
-          mv firmware/main/Main.c firmware/main/main.c
-          echo "✅ Renamed Main.c to main.c"
-        fi
-        
-        # Se main.c non esiste, crealo con il contenuto dal repository
-        if [ ! -f "firmware/main/main.c" ]; then
-          echo "⚠️ main.c not found, creating from repository content..."
-          
-          # Usa il contenuto del main.c dal documento fornito
-          cat > firmware/main/main.c << 'EOF'
-        #include <stdio.h>
-        #include <stdlib.h>
-        #include <string.h>
-        #include <time.h>
-        #include "freertos/FreeRTOS.h"
-        #include "freertos/task.h"
-        #include "esp_system.h"
-        #include "esp_log.h"
-        #include "esp_wifi.h"
-        #include "esp_event.h"
-        #include "esp_netif.h"
-        #include "nvs_flash.h"
-        
-        #include "version.h"
-        #include "config.h"
-        
-        static const char *TAG = "ICE_PULSE_MAIN";
-        
-        // Task handles
-        static TaskHandle_t sensor_task_handle = NULL;
-        static TaskHandle_t data_send_task_handle = NULL;
-        static TaskHandle_t ota_check_task_handle = NULL;
-        
-        // Application state
-        typedef struct {
-            bool wifi_connected;
-            bool sensors_initialized;
-            bool ota_in_progress;
-            uint32_t reading_count;
-            uint32_t data_send_count;
-            uint32_t ota_check_count;
-            float last_temperature;
-            float last_humidity;
-        } app_state_t;
-        
-        static app_state_t app_state = {0};
-        
-        void sensor_task(void *parameter) {
-            ESP_LOGI(TAG, "Sensor task started");
-            
-            while (1) {
-                app_state.last_temperature = -18.5f + (esp_random() % 100) / 100.0f;
-                app_state.last_humidity = 65.0f + (esp_random() % 200 - 100) / 100.0f;
-                app_state.reading_count++;
-                
-                ESP_LOGI(TAG, "Reading #%lu - T:%.2f°C H:%.2f%%", 
-                         app_state.reading_count, app_state.last_temperature, app_state.last_humidity);
-                
-                vTaskDelay(pdMS_TO_TICKS(5 * 60 * 1000));
-            }
-        }
-        
-        void data_send_task(void *parameter) {
-            ESP_LOGI(TAG, "Data send task started");
-            
-            while (1) {
-                if (app_state.wifi_connected && app_state.reading_count > 0) {
-                    ESP_LOGI(TAG, "Sending data #%lu to API (NO OTA CHECK HERE)", 
-                             app_state.data_send_count + 1);
-                    
-                    app_state.data_send_count++;
-                    ESP_LOGI(TAG, "Data sent successfully");
-                }
-                
-                vTaskDelay(pdMS_TO_TICKS(10 * 60 * 1000));
-            }
-        }
-        
-        void ota_check_task(void *parameter) {
-            ESP_LOGI(TAG, "OTA check task started (every 6 hours)");
-            
-            vTaskDelay(pdMS_TO_TICKS(30000));
-            
-            while (1) {
-                if (app_state.wifi_connected && !app_state.ota_in_progress) {
-                    ESP_LOGI(TAG, "OTA Check #%lu - Checking http://localhost:8092", 
-                             app_state.ota_check_count + 1);
-                    
-                    app_state.ota_check_count++;
-                    ESP_LOGI(TAG, "Firmware is up to date");
-                }
-                
-                vTaskDelay(pdMS_TO_TICKS(6 * 60 * 60 * 1000));
-            }
-        }
-        
-        esp_err_t app_init(void) {
-            ESP_LOGI(TAG, "Starting Ice Pulse Sensor v%s", FIRMWARE_VERSION);
-            ESP_LOGI(TAG, "OTA Strategy: Separated tasks - Data every 10min, OTA check every 6h");
-            
-            esp_err_t ret = nvs_flash_init();
-            if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-                ESP_ERROR_CHECK(nvs_flash_erase());
-                ret = nvs_flash_init();
-            }
-            ESP_ERROR_CHECK(ret);
-            
-            ESP_ERROR_CHECK(esp_netif_init());
-            ESP_ERROR_CHECK(esp_event_loop_create_default());
-            
-            app_state.wifi_connected = true;
-            app_state.sensors_initialized = true;
-            
-            return ESP_OK;
-        }
-        
-        void app_main(void) {
-            ESP_LOGI(TAG, "Ice Pulse Sensor starting...");
-            ESP_LOGI(TAG, "Task Strategy: SENSOR (high) + DATA_SEND (medium) + OTA_CHECK (low)");
-            
-            ESP_ERROR_CHECK(app_init());
-            
-            xTaskCreate(sensor_task, "sensor_task", 4096, NULL, 5, &sensor_task_handle);
-            xTaskCreate(data_send_task, "data_send_task", 8192, NULL, 4, &data_send_task_handle);
-            xTaskCreate(ota_check_task, "ota_check_task", 8192, NULL, 2, &ota_check_task_handle);
-            
-            ESP_LOGI(TAG, "All tasks running independently!");
-            
-            while (1) {
-                ESP_LOGI(TAG, "Status - Reads:%lu | DataSent:%lu | OTAChecks:%lu", 
-                         app_state.reading_count, app_state.data_send_count, app_state.ota_check_count);
-                vTaskDelay(pdMS_TO_TICKS(60000));
-            }
-        }
-        EOF
-        fi
-        
-        # Aggiorna version.h con la versione corrente
+        # Aggiorna solo version.h con la versione corrente
         cat > firmware/main/version.h << EOF
         #ifndef VERSION_H
         #define VERSION_H
@@ -209,142 +61,48 @@ jobs:
         #endif
         EOF
         
-        # Aggiorna CMakeLists.txt per main/
-        cat > firmware/main/CMakeLists.txt << 'EOF'
-        idf_component_register(
-            SRCS "main.c"
-            INCLUDE_DIRS "."
-        )
-        EOF
-        
-        # Assicurati che partitions.csv esista
-        if [ ! -f "firmware/partitions.csv" ]; then
-          cat > firmware/partitions.csv << 'EOF'
-        # Name,   Type, SubType, Offset,  Size, Flags
-        nvs,      data, nvs,     0x9000,  0x6000,
-        phy_init, data, phy,     0xf000,  0x1000,
-        factory,  app,  factory, 0x10000, 1M,
-        ota_0,    app,  ota_0,   0x110000,1M,
-        ota_1,    app,  ota_1,   0x210000,1M,
-        ota_data, data, ota,     0x310000,0x2000,
-        storage,  data, spiffs,  0x312000,0xEE000,
-        EOF
-        fi
-        
-        echo "=== Project structure ready ==="
-        ls -la firmware/main/
-        echo "=== Content of main.c (first 20 lines) ==="
-        head -20 firmware/main/main.c || echo "main.c not found!"
-        
     - name: Setup ESP-IDF and Build
       uses: espressif/esp-idf-ci-action@v1
       with:
         esp_idf_version: ${{ env.ESP_IDF_VERSION }}
         target: esp32
         path: 'firmware'
-        command: |
-          echo "=== Building ESP32 firmware ==="
-          echo "Current directory: $(pwd)"
-          echo "Directory structure:"
-          ls -la .
-          ls -la main/
-          
-          echo "=== Verifying main.c exists ==="
-          if [ ! -f "main/main.c" ]; then
-            echo "❌ ERROR: main.c not found!"
-            exit 1
-          fi
-          
-          echo "=== ESP-IDF Build Process ==="
-          echo "Step 1: Clean any previous build"
-          rm -rf build sdkconfig
-          
-          echo "Step 2: Set target"
-          idf.py set-target esp32
-          
-          echo "Step 3: Build"
-          idf.py build
-          
-          echo "=== Build completed - checking results ==="
-          echo "Build directory contents:"
-          ls -la build/
-          
-          echo "Looking for firmware binary:"
-          if [ -f "build/ice-pulse-sensor.bin" ]; then
-            echo "✅ Firmware binary found"
-            ls -la build/ice-pulse-sensor.bin
-          else
-            echo "❌ Firmware binary NOT found"
-            echo "Available binaries:"
-            find build/ -name "*.bin" -type f
-          fi
+        command: idf.py build
         
-    - name: Extract Build Info
+    - name: Check Build Output
       id: build_info
       run: |
         cd firmware
         
-        echo "=== Looking for firmware binary ==="
-        
-        # Il binario principale dovrebbe essere ice-pulse-sensor.bin
-        EXPECTED_BINARY="ice-pulse-sensor.bin"
-        
-        if [ -f "build/$EXPECTED_BINARY" ]; then
-          BINARY_NAME="$EXPECTED_BINARY"
-          echo "✅ Found firmware binary: $BINARY_NAME"
+        # Cerca il binario del firmware
+        if [ -f "build/ice-pulse-sensor.bin" ]; then
+          BINARY_NAME="ice-pulse-sensor.bin"
         else
-          echo "❌ Expected binary not found, searching for alternatives..."
-          
-          # Cerca altri binari possibili
-          BINARY_NAME=$(find build/ -maxdepth 1 -name "*.bin" -not -name "bootloader.bin" -not -name "partition*.bin" | head -1 | xargs basename 2>/dev/null || echo "")
-          
-          if [ -z "$BINARY_NAME" ]; then
-            echo "❌ No firmware binary found!"
-            echo "Build directory contents:"
-            ls -la build/
-            exit 1
-          fi
-        fi
-        
-        echo "Using firmware binary: $BINARY_NAME"
-        
-        # Ottieni dimensione del firmware
-        FIRMWARE_SIZE=$(stat -c%s "build/$BINARY_NAME" 2>/dev/null || echo "0")
-        if [ "$FIRMWARE_SIZE" -lt 10000 ]; then
-          echo "❌ Firmware too small or not found"
+          echo "❌ Firmware binary not found!"
           exit 1
         fi
         
-        BOOTLOADER_SIZE=$(stat -c%s build/bootloader/bootloader.bin 2>/dev/null || echo "0")
-        
+        # Ottieni dimensione del firmware
+        FIRMWARE_SIZE=$(stat -c%s "build/$BINARY_NAME")
         echo "firmware_size=$FIRMWARE_SIZE" >> $GITHUB_OUTPUT
-        echo "bootloader_size=$BOOTLOADER_SIZE" >> $GITHUB_OUTPUT
-        echo "binary_name=$BINARY_NAME" >> $GITHUB_OUTPUT
-        
-        echo "=== Firmware Build Summary ==="
-        echo "Firmware binary: $BINARY_NAME"
         echo "Firmware size: $FIRMWARE_SIZE bytes"
-        echo "Bootloader size: $BOOTLOADER_SIZE bytes"
         
-    - name: Generate OTA Package
+    - name: Create OTA Package
       run: |
-        cd firmware
-        mkdir -p ../ota-package
-        
-        BINARY_NAME="${{ steps.build_info.outputs.binary_name }}"
+        mkdir -p ota-package
         
         # Copia i file necessari per OTA
-        cp build/$BINARY_NAME ../ota-package/firmware.bin
-        cp build/bootloader/bootloader.bin ../ota-package/
-        cp build/partition_table/partition-table.bin ../ota-package/
+        cp firmware/build/ice-pulse-sensor.bin ota-package/firmware.bin
+        cp firmware/build/bootloader/bootloader.bin ota-package/
+        cp firmware/build/partition_table/partition-table.bin ota-package/
         
         # Genera manifest OTA
-        cat > ../ota-package/manifest.json << EOF
+        cat > ota-package/manifest.json << EOF
         {
           "version": "${{ steps.get_version.outputs.version }}",
           "build_time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
           "firmware_size": ${{ steps.build_info.outputs.firmware_size }},
-          "sha256": "$(sha256sum ../ota-package/firmware.bin | cut -d' ' -f1)",
+          "sha256": "$(sha256sum ota-package/firmware.bin | cut -d' ' -f1)",
           "target": "esp32",
           "idf_version": "${{ env.ESP_IDF_VERSION }}",
           "commit": "${{ github.sha }}",
@@ -353,18 +111,11 @@ jobs:
         }
         EOF
         
-        echo "=== OTA Package created ==="
-        ls -la ../ota-package/
-        cat ../ota-package/manifest.json
-        
     - name: Upload Firmware Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: firmware-${{ steps.get_version.outputs.version }}
-        path: |
-          ota-package/
-          firmware/build/flash_args
-          firmware/build/sdkconfig
+        path: ota-package/
         retention-days: 30
 
   package:
@@ -373,27 +124,23 @@ jobs:
     needs: build
     
     steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
-      
     - name: Download Firmware
       uses: actions/download-artifact@v4
       with:
         name: firmware-${{ needs.build.outputs.version }}
-        path: ./artifacts
+        path: ./firmware
         
-    - name: Setup OTA Server Structure
+    - name: Create OTA Server
       run: |
         mkdir -p ota-server/static/firmware
         mkdir -p ota-server/templates
         
-        # Copia firmware nel server OTA
-        cp -r artifacts/ota-package/* ota-server/static/firmware/
+        # Copia firmware
+        cp -r firmware/* ota-server/static/firmware/
         
-        # Crea server OTA Flask
+        # Server OTA minimo
         cat > ota-server/app.py << 'EOF'
-        from flask import Flask, jsonify, send_from_directory, render_template, request
-        import os
+        from flask import Flask, jsonify, send_from_directory
         import json
         from datetime import datetime
         
@@ -401,19 +148,12 @@ jobs:
         
         @app.route('/health')
         def health():
-            return jsonify({
-                "status": "ok", 
-                "service": "ota-server",
-                "timestamp": datetime.utcnow().isoformat() + "Z"
-            })
+            return jsonify({"status": "ok", "timestamp": datetime.utcnow().isoformat()})
         
         @app.route('/firmware/manifest')
         def firmware_manifest():
-            try:
-                with open('static/firmware/manifest.json') as f:
-                    return json.load(f)
-            except FileNotFoundError:
-                return jsonify({"error": "No firmware available"}), 404
+            with open('static/firmware/manifest.json') as f:
+                return json.load(f)
         
         @app.route('/firmware/download')
         def download_firmware():
@@ -421,146 +161,41 @@ jobs:
         
         @app.route('/firmware/check/<device_version>')
         def check_update(device_version):
-            try:
-                with open('static/firmware/manifest.json') as f:
-                    manifest = json.load(f)
-                
-                needs_update = device_version != manifest['version']
-                return jsonify({
-                    "needs_update": needs_update,
-                    "latest_version": manifest['version'],
-                    "current_version": device_version,
-                    "download_url": "/firmware/download" if needs_update else None,
-                    "firmware_size": manifest.get('firmware_size', 0),
-                    "sha256": manifest.get('sha256', '')
-                })
-            except FileNotFoundError:
-                return jsonify({"error": "No firmware available"}), 404
-        
-        @app.route('/devices/<device_id>/update', methods=['POST'])
-        def trigger_update(device_id):
+            with open('static/firmware/manifest.json') as f:
+                manifest = json.load(f)
+            
+            needs_update = device_version != manifest['version']
             return jsonify({
-                "device_id": device_id,
-                "update_triggered": True,
-                "timestamp": datetime.utcnow().isoformat() + "Z"
+                "needs_update": needs_update,
+                "latest_version": manifest['version'],
+                "current_version": device_version,
+                "download_url": "/firmware/download" if needs_update else None
             })
         
-        @app.route('/')
-        def dashboard():
-            return render_template('dashboard.html')
-        
         if __name__ == '__main__':
-            app.run(host='0.0.0.0', port=5000, debug=True)
-        EOF
-        
-        # Dashboard HTML
-        cat > ota-server/templates/dashboard.html << 'EOF'
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>🔌 Ice Pulse OTA Server</title>
-            <style>
-                body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 40px; background: #f5f5f5; }
-                .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-                h1 { color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }
-                .status { padding: 15px; margin: 20px 0; border-radius: 5px; }
-                .status.online { background: #d4edda; border: 1px solid #c3e6cb; color: #155724; }
-                .endpoint { background: #f8f9fa; padding: 15px; margin: 10px 0; border-radius: 5px; border-left: 4px solid #007bff; }
-                .endpoint code { background: #e9ecef; padding: 2px 5px; border-radius: 3px; }
-                a { color: #007bff; text-decoration: none; }
-                a:hover { text-decoration: underline; }
-                .footer { margin-top: 30px; text-align: center; color: #6c757d; font-size: 0.9em; }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>🔌 Ice Pulse OTA Server</h1>
-                <div class="status online">
-                    ✅ Server online and ready for ESP32 firmware updates
-                </div>
-                
-                <h2>📡 Available Endpoints</h2>
-                <div class="endpoint">
-                    <strong>Health Check:</strong><br>
-                    <code>GET <a href="/health">/health</a></code><br>
-                    <small>Check server status</small>
-                </div>
-                
-                <div class="endpoint">
-                    <strong>Firmware Manifest:</strong><br>
-                    <code>GET <a href="/firmware/manifest">/firmware/manifest</a></code><br>
-                    <small>Get firmware information and metadata</small>
-                </div>
-                
-                <div class="endpoint">
-                    <strong>Download Firmware:</strong><br>
-                    <code>GET <a href="/firmware/download">/firmware/download</a></code><br>
-                    <small>Download latest firmware binary</small>
-                </div>
-                
-                <div class="endpoint">
-                    <strong>Check for Updates:</strong><br>
-                    <code>GET /firmware/check/{device_version}</code><br>
-                    <small>Check if device needs firmware update</small>
-                </div>
-                
-                <h2>🛠️ ESP32 Integration</h2>
-                <p>Configure your ESP32 devices to check this server for OTA updates:</p>
-                <div class="endpoint">
-                    <code>#define OTA_SERVER_URL "http://your-server:8092"</code>
-                </div>
-                
-                <div class="footer">
-                    <p>Ice Pulse Sensor Firmware OTA Server | Environment: Development</p>
-                </div>
-            </div>
-        </body>
-        </html>
+            app.run(host='0.0.0.0', port=5000)
         EOF
         
         # Requirements
         cat > ota-server/requirements.txt << 'EOF'
         flask==3.0.0
         gunicorn==21.2.0
-        requests==2.31.0
         EOF
         
-    - name: Create OTA Server Dockerfile
-      run: |
+        # Dockerfile
         cat > ota-server/Dockerfile << 'EOF'
         FROM python:3.11-alpine
-        
         WORKDIR /app
-        
         RUN apk add --no-cache curl
-        
         COPY requirements.txt .
         RUN pip install --no-cache-dir -r requirements.txt
-        
         COPY . .
-        
-        RUN mkdir -p static/firmware
-        
         EXPOSE 5000
-        
-        HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
-          CMD curl -f http://localhost:5000/health || exit 1
-        
-        CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--timeout", "120", "app:app"]
+        HEALTHCHECK CMD curl -f http://localhost:5000/health || exit 1
+        CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "app:app"]
         EOF
         
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-      
-    - name: Log in to Docker Hub
-      uses: docker/login-action@v3
-      with:
-        username: ${{ secrets.DOCKER_USERNAME }}
-        password: ${{ secrets.DOCKER_PASSWORD }}
-        
-    - name: Build and Push OTA Server
+    - name: Build and Push Docker Image
       uses: docker/build-push-action@v5
       with:
         context: ./ota-server
@@ -568,11 +203,9 @@ jobs:
         tags: |
           ${{ env.FIRMWARE_IMAGE }}-ota:${{ needs.build.outputs.version }}
           ${{ env.FIRMWARE_IMAGE }}-ota:dev-latest
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
 
   deploy:
-    name: Update Infrastructure Repository
+    name: Deploy to Infrastructure
     runs-on: ubuntu-latest
     needs: [build, package]
     
@@ -582,137 +215,36 @@ jobs:
       with:
         ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
         
-    - name: Clone Infrastructure Repository
+    - name: Update Infrastructure
       run: |
-        echo "=== Cloning infra repository with SSH ==="
+        # Clone infra repo
         git clone ${{ env.INFRA_REPO_URL }} infra-repo
         cd infra-repo
-        git checkout ${{ env.INFRA_BRANCH }}
-        
-        echo "=== Git configuration ==="
-        git config user.name "GitHub Actions Bot"
+        git config user.name "GitHub Actions"
         git config user.email "actions@github.com"
         
-    - name: Install yq
-      run: |
-        echo "=== Installing yq ==="
-        sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq
-        sudo chmod +x /usr/bin/yq
-        yq --version
-        
-    - name: Update OTA Server Configuration
-      run: |
-        cd infra-repo
-        
-        echo "=== Creating/updating OTA server docker-compose ==="
-        if [ ! -f "${{ env.DEPLOY_PATH_DEV }}" ]; then
-          echo "Creating firmware OTA docker-compose file..."
-          mkdir -p $(dirname ${{ env.DEPLOY_PATH_DEV }})
-          cat > ${{ env.DEPLOY_PATH_DEV }} << 'EOF'
+        # Crea/aggiorna docker-compose per OTA server
+        mkdir -p $(dirname ${{ env.DEPLOY_PATH_DEV }})
+        cat > ${{ env.DEPLOY_PATH_DEV }} << EOF
         version: '3.8'
         services:
           ice-pulse-ota-dev:
-            image: aipioppi/ice-pulse-firmware-ota:dev-latest
+            image: ${{ env.FIRMWARE_IMAGE }}-ota:${{ needs.build.outputs.version }}
             container_name: ice-pulse-ota-dev
             ports:
               - "8092:5000"
             environment:
               - ENVIRONMENT=development
-              - FLASK_ENV=development
+              - FIRMWARE_VERSION=${{ needs.build.outputs.version }}
             restart: always
-            labels:
-              - "com.centurylinklabs.watchtower.enable=true"
             healthcheck:
               test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
               interval: 30s
               timeout: 10s
               retries: 3
-            logging:
-              driver: "json-file"
-              options:
-                max-size: "10m"
-                max-file: "3"
-              
-          watchtower-ota-dev:
-            image: containrrr/watchtower
-            container_name: watchtower-ota-dev
-            restart: always
-            volumes:
-              - /var/run/docker.sock:/var/run/docker.sock
-            command: --interval 180 --cleanup ice-pulse-ota-dev
-            logging:
-              driver: "json-file"
-              options:
-                max-size: "10m"
-                max-file: "3"
         EOF
-        fi
         
-        echo "=== Updating OTA server image version ==="
-        yq e -i '.services.ice-pulse-ota-dev.image = "aipioppi/ice-pulse-firmware-ota:${{ needs.build.outputs.version }}"' ${{ env.DEPLOY_PATH_DEV }}
-        
-        # Aggiorna timestamp e versione firmware
-        TIMESTAMP=$(date +%s)
-        yq e -i ".services.ice-pulse-ota-dev.environment += [\"DEPLOY_TIMESTAMP=${TIMESTAMP}\"]" ${{ env.DEPLOY_PATH_DEV }} || echo "Could not add timestamp"
-        yq e -i ".services.ice-pulse-ota-dev.environment += [\"FIRMWARE_VERSION=${{ needs.build.outputs.version }}\"]" ${{ env.DEPLOY_PATH_DEV }} || echo "Could not add firmware version"
-        
-        echo "=== Updated OTA server configuration ==="
-        cat ${{ env.DEPLOY_PATH_DEV }}
-        
-    - name: Commit and Push Changes
-      run: |
-        cd infra-repo
-        
-        if git diff --quiet; then
-          echo "No changes to commit"
-          exit 0
-        fi
-        
-        echo "=== Committing OTA server changes ==="
+        # Commit e push
         git add ${{ env.DEPLOY_PATH_DEV }}
-        git commit -m "🔌 Deploy firmware OTA dev: ${{ needs.build.outputs.version }}
-
-        - OTA Server: aipioppi/ice-pulse-firmware-ota:${{ needs.build.outputs.version }}
-        - Firmware Version: ${{ needs.build.outputs.version }}
-        - Firmware Size: ${{ needs.build.outputs.firmware_size }} bytes
-        - ESP-IDF Version: ${{ env.ESP_IDF_VERSION }}
-        - Commit: ${{ github.sha }}
-        - Actor: ${{ github.actor }}
-        - Environment: development"
-        
-        echo "=== Pushing to remote with SSH ==="
+        git commit -m "Deploy firmware OTA dev: ${{ needs.build.outputs.version }}" || exit 0
         git push origin ${{ env.INFRA_BRANCH }}
-
-  notify:
-    name: Notify Firmware Deployment
-    runs-on: ubuntu-latest
-    needs: [build, package, deploy]
-    if: always()
-    
-    steps:
-    - name: Deployment Summary
-      run: |
-        echo "## 🔌 ESP32 Firmware Deployment Summary" >> $GITHUB_STEP_SUMMARY
-        echo "- **Environment**: development" >> $GITHUB_STEP_SUMMARY
-        echo "- **Firmware Version**: ${{ needs.build.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Firmware Size**: ${{ needs.build.outputs.firmware_size }} bytes" >> $GITHUB_STEP_SUMMARY
-        echo "- **ESP-IDF Version**: ${{ env.ESP_IDF_VERSION }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **OTA Server**: aipioppi/ice-pulse-firmware-ota:${{ needs.build.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **OTA URL**: http://localhost:8092" >> $GITHUB_STEP_SUMMARY
-        echo "- **Dashboard**: http://localhost:8092/" >> $GITHUB_STEP_SUMMARY
-        echo "- **Health Check**: http://localhost:8092/health" >> $GITHUB_STEP_SUMMARY
-        echo "- **Firmware Download**: http://localhost:8092/firmware/download" >> $GITHUB_STEP_SUMMARY
-        
-    - name: Notify Success
-      if: needs.deploy.result == 'success'
-      run: |
-        echo "✅ ESP32 Firmware deployment successful!"
-        echo "Version: ${{ needs.build.outputs.version }}"
-        echo "OTA Server: http://localhost:8092"
-        echo "Firmware size: ${{ needs.build.outputs.firmware_size }} bytes"
-        echo "ESP32 devices can now update to this version automatically"
-        
-    - name: Notify Failure
-      if: needs.deploy.result == 'failure'
-      run: |
-        echo "❌ ESP32
