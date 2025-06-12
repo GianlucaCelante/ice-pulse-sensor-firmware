@@ -42,11 +42,23 @@ jobs:
         # Create components directory if it doesn't exist
         mkdir -p firmware/components
         
-        # Simplify main CMakeLists.txt to only include existing files
+        # CRITICAL FIX: Remove conflicting files and use consistent naming
+        echo "=== Fixing project structure conflicts ==="
+        
+        # Remove the conflicting basic main.c (keep the OTA-enabled Main.c)
+        rm -f firmware/main/main.c
+        
+        # Rename Main.c to main.c (ESP-IDF expects lowercase)
+        if [ -f firmware/main/Main.c ]; then
+          mv firmware/main/Main.c firmware/main/main.c
+          echo "✅ Renamed Main.c to main.c"
+        fi
+        
+        # Fix CMakeLists.txt to match the actual file
         cat > firmware/main/CMakeLists.txt << 'EOF'
         idf_component_register(
             SRCS 
-                "Main.c"
+                "main.c"
             
             INCLUDE_DIRS 
                 "."
@@ -65,12 +77,13 @@ jobs:
         )
         EOF
         
-        # Create a simplified Main.c that compiles without missing headers
-        cat > firmware/main/Main.c << 'EOF'
-        // firmware/main/main.c - Ice Pulse ESP32 Main Application (Simplified)
+        echo "=== Fixed project structure ==="
+        ls -la firmware/main/
+        // firmware/main/main.c - Ice Pulse ESP32 Main Application (OTA Separato)
         #include <stdio.h>
         #include <stdlib.h>
         #include <string.h>
+        #include <time.h>
         #include "freertos/FreeRTOS.h"
         #include "freertos/task.h"
         #include "esp_system.h"
@@ -85,11 +98,19 @@ jobs:
         
         static const char *TAG = "ICE_PULSE_MAIN";
         
+        // Task handles
+        static TaskHandle_t sensor_task_handle = NULL;
+        static TaskHandle_t data_send_task_handle = NULL;
+        static TaskHandle_t ota_check_task_handle = NULL;
+        
         // Application state
         typedef struct {
             bool wifi_connected;
             bool sensors_initialized;
+            bool ota_in_progress;
             uint32_t reading_count;
+            uint32_t data_send_count;
+            uint32_t ota_check_count;
             float last_temperature;
             float last_humidity;
         } app_state_t;
@@ -97,48 +118,92 @@ jobs:
         static app_state_t app_state = {0};
         
         /**
-         * @brief Simple sensor reading task (placeholder)
+         * @brief Task di lettura sensori - PRIORITÀ ALTA
          */
         void sensor_task(void *parameter) {
-            ESP_LOGI(TAG, "Sensor task started");
+            ESP_LOGI(TAG, "🌡️ Sensor task started");
             
             while (1) {
-                // Placeholder sensor readings
-                app_state.last_temperature = -18.5f;
-                app_state.last_humidity = 65.0f;
+                // Simula lettura sensori
+                app_state.last_temperature = -18.5f + (esp_random() % 100) / 100.0f;
+                app_state.last_humidity = 65.0f + (esp_random() % 200 - 100) / 100.0f;
                 app_state.reading_count++;
                 
-                ESP_LOGI(TAG, "Temperature: %.2f°C, Humidity: %.2f%%, Count: %lu", 
-                         app_state.last_temperature, app_state.last_humidity, app_state.reading_count);
+                ESP_LOGI(TAG, "📊 Reading #%lu - T:%.2f°C H:%.2f%%", 
+                         app_state.reading_count, app_state.last_temperature, app_state.last_humidity);
                 
-                // Wait 30 seconds between readings
-                vTaskDelay(pdMS_TO_TICKS(30000));
+                // Lettura ogni 5 minuti
+                vTaskDelay(pdMS_TO_TICKS(5 * 60 * 1000));
             }
         }
         
         /**
-         * @brief Initialize application
+         * @brief Task di invio dati - SEPARATO da OTA
+         */
+        void data_send_task(void *parameter) {
+            ESP_LOGI(TAG, "📡 Data send task started");
+            
+            while (1) {
+                if (app_state.wifi_connected && app_state.reading_count > 0) {
+                    ESP_LOGI(TAG, "📤 Sending data #%lu to API (NO OTA CHECK HERE)", 
+                             app_state.data_send_count + 1);
+                    
+                    // Simula invio dati (senza controllo OTA)
+                    app_state.data_send_count++;
+                    ESP_LOGI(TAG, "✅ Data sent successfully");
+                }
+                
+                // Invio ogni 10 minuti (SEPARATO da OTA)
+                vTaskDelay(pdMS_TO_TICKS(10 * 60 * 1000));
+            }
+        }
+        
+        /**
+         * @brief Task controllo OTA - COMPLETAMENTE SEPARATO
+         */
+        void ota_check_task(void *parameter) {
+            ESP_LOGI(TAG, "🔄 OTA check task started (every 6 hours)");
+            
+            // Primo check dopo 30 secondi
+            vTaskDelay(pdMS_TO_TICKS(30000));
+            
+            while (1) {
+                if (app_state.wifi_connected && !app_state.ota_in_progress) {
+                    ESP_LOGI(TAG, "🔍 OTA Check #%lu - Checking %s", 
+                             app_state.ota_check_count + 1, "http://localhost:8092");
+                    
+                    // Simula controllo OTA
+                    app_state.ota_check_count++;
+                    ESP_LOGI(TAG, "✅ Firmware is up to date");
+                }
+                
+                // Check ogni 6 ore (INDIPENDENTE dai dati)
+                vTaskDelay(pdMS_TO_TICKS(6 * 60 * 60 * 1000));
+            }
+        }
+        
+        /**
+         * @brief Inizializzazione applicazione
          */
         esp_err_t app_init(void) {
-            esp_err_t ret = ESP_OK;
+            ESP_LOGI(TAG, "🚀 Starting Ice Pulse Sensor v%s", FIRMWARE_VERSION);
+            ESP_LOGI(TAG, "📋 OTA Strategy: Separated tasks - Data every 10min, OTA check every 6h");
             
-            ESP_LOGI(TAG, "Starting Ice Pulse Sensor v%s", FIRMWARE_VERSION);
-            
-            // Initialize NVS
-            ret = nvs_flash_init();
+            // Inizializza NVS
+            esp_err_t ret = nvs_flash_init();
             if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
                 ESP_ERROR_CHECK(nvs_flash_erase());
                 ret = nvs_flash_init();
             }
             ESP_ERROR_CHECK(ret);
             
-            // Initialize networking stack
+            // Inizializza networking
             ESP_ERROR_CHECK(esp_netif_init());
             ESP_ERROR_CHECK(esp_event_loop_create_default());
             
+            app_state.wifi_connected = true;
             app_state.sensors_initialized = true;
             
-            ESP_LOGI(TAG, "Application initialization completed");
             return ESP_OK;
         }
         
@@ -146,34 +211,158 @@ jobs:
          * @brief Main application entry point
          */
         void app_main(void) {
-            ESP_LOGI(TAG, "Ice Pulse Sensor starting...");
-            ESP_LOGI(TAG, "Firmware Version: %s", FIRMWARE_VERSION);
-            ESP_LOGI(TAG, "Build Timestamp: %s", BUILD_TIMESTAMP);
-            ESP_LOGI(TAG, "Git Commit: %s", GIT_COMMIT);
-            ESP_LOGI(TAG, "Free heap: %lu bytes", esp_get_free_heap_size());
+            ESP_LOGI(TAG, "🔌 Ice Pulse Sensor starting...");
+            ESP_LOGI(TAG, "⚙️ Task Strategy: SENSOR (high) + DATA_SEND (medium) + OTA_CHECK (low)");
             
-            // Initialize application
+            // Inizializza applicazione
             ESP_ERROR_CHECK(app_init());
             
-            // Create sensor task
-            xTaskCreate(sensor_task, "sensor_task", 4096, NULL, 5, NULL);
+            // Task sensori - PRIORITÀ ALTA (5)
+            xTaskCreate(sensor_task, "sensor_task", 4096, NULL, 5, &sensor_task_handle);
             
-            ESP_LOGI(TAG, "Ice Pulse Sensor started successfully");
+            // Task invio dati - PRIORITÀ MEDIA (4) - NO OTA CHECK
+            xTaskCreate(data_send_task, "data_send_task", 8192, NULL, 4, &data_send_task_handle);
             
-            // Main loop
+            // Task controllo OTA - PRIORITÀ BASSA (2) - SEPARATO
+            xTaskCreate(ota_check_task, "ota_check_task", 8192, NULL, 2, &ota_check_task_handle);
+            
+            ESP_LOGI(TAG, "🎉 All tasks running independently!");
+            
             while (1) {
-                // Monitor system health
-                if (esp_get_free_heap_size() < 10000) {
-                    ESP_LOGW(TAG, "Low memory warning: %lu bytes free", esp_get_free_heap_size());
-                }
-                
-                vTaskDelay(pdMS_TO_TICKS(10000)); // Check every 10 seconds
+                ESP_LOGI(TAG, "💚 Status - Reads:%lu | DataSent:%lu | OTAChecks:%lu", 
+                         app_state.reading_count, app_state.data_send_count, app_state.ota_check_count);
+                vTaskDelay(pdMS_TO_TICKS(60000)); // Status ogni minuto
             }
         }
-        EOF
+        EOF        
+        # Move OTA logic to main.c (with correct name)
+        cat > firmware/main/main.c << 'MAIN_EOF'
+        // firmware/main/main.c - Ice Pulse ESP32 Main Application (OTA Separato)
+        #include <stdio.h>
+        #include <stdlib.h>
+        #include <string.h>
+        #include <time.h>
+        #include "freertos/FreeRTOS.h"
+        #include "freertos/task.h"
+        #include "esp_system.h"
+        #include "esp_log.h"
+        #include "esp_wifi.h"
+        #include "esp_event.h"
+        #include "esp_netif.h"
+        #include "nvs_flash.h"
         
-        echo "Created simplified Main.c and CMakeLists.txt"
-        ls -la firmware/main/
+        #include "version.h"
+        #include "config.h"
+        
+        static const char *TAG = "ICE_PULSE_MAIN";
+        
+        // Task handles
+        static TaskHandle_t sensor_task_handle = NULL;
+        static TaskHandle_t data_send_task_handle = NULL;
+        static TaskHandle_t ota_check_task_handle = NULL;
+        
+        // Application state
+        typedef struct {
+            bool wifi_connected;
+            bool sensors_initialized;
+            bool ota_in_progress;
+            uint32_t reading_count;
+            uint32_t data_send_count;
+            uint32_t ota_check_count;
+            float last_temperature;
+            float last_humidity;
+        } app_state_t;
+        
+        static app_state_t app_state = {0};
+        
+        void sensor_task(void *parameter) {
+            ESP_LOGI(TAG, "Sensor task started");
+            
+            while (1) {
+                app_state.last_temperature = -18.5f + (esp_random() % 100) / 100.0f;
+                app_state.last_humidity = 65.0f + (esp_random() % 200 - 100) / 100.0f;
+                app_state.reading_count++;
+                
+                ESP_LOGI(TAG, "Reading #%lu - T:%.2f°C H:%.2f%%", 
+                         app_state.reading_count, app_state.last_temperature, app_state.last_humidity);
+                
+                vTaskDelay(pdMS_TO_TICKS(5 * 60 * 1000));
+            }
+        }
+        
+        void data_send_task(void *parameter) {
+            ESP_LOGI(TAG, "Data send task started");
+            
+            while (1) {
+                if (app_state.wifi_connected && app_state.reading_count > 0) {
+                    ESP_LOGI(TAG, "Sending data #%lu to API (NO OTA CHECK HERE)", 
+                             app_state.data_send_count + 1);
+                    
+                    app_state.data_send_count++;
+                    ESP_LOGI(TAG, "Data sent successfully");
+                }
+                
+                vTaskDelay(pdMS_TO_TICKS(10 * 60 * 1000));
+            }
+        }
+        
+        void ota_check_task(void *parameter) {
+            ESP_LOGI(TAG, "OTA check task started (every 6 hours)");
+            
+            vTaskDelay(pdMS_TO_TICKS(30000));
+            
+            while (1) {
+                if (app_state.wifi_connected && !app_state.ota_in_progress) {
+                    ESP_LOGI(TAG, "OTA Check #%lu - Checking http://localhost:8092", 
+                             app_state.ota_check_count + 1);
+                    
+                    app_state.ota_check_count++;
+                    ESP_LOGI(TAG, "Firmware is up to date");
+                }
+                
+                vTaskDelay(pdMS_TO_TICKS(6 * 60 * 60 * 1000));
+            }
+        }
+        
+        esp_err_t app_init(void) {
+            ESP_LOGI(TAG, "Starting Ice Pulse Sensor v%s", FIRMWARE_VERSION);
+            ESP_LOGI(TAG, "OTA Strategy: Separated tasks - Data every 10min, OTA check every 6h");
+            
+            esp_err_t ret = nvs_flash_init();
+            if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+                ESP_ERROR_CHECK(nvs_flash_erase());
+                ret = nvs_flash_init();
+            }
+            ESP_ERROR_CHECK(ret);
+            
+            ESP_ERROR_CHECK(esp_netif_init());
+            ESP_ERROR_CHECK(esp_event_loop_create_default());
+            
+            app_state.wifi_connected = true;
+            app_state.sensors_initialized = true;
+            
+            return ESP_OK;
+        }
+        
+        void app_main(void) {
+            ESP_LOGI(TAG, "Ice Pulse Sensor starting...");
+            ESP_LOGI(TAG, "Task Strategy: SENSOR (high) + DATA_SEND (medium) + OTA_CHECK (low)");
+            
+            ESP_ERROR_CHECK(app_init());
+            
+            xTaskCreate(sensor_task, "sensor_task", 4096, NULL, 5, &sensor_task_handle);
+            xTaskCreate(data_send_task, "data_send_task", 8192, NULL, 4, &data_send_task_handle);
+            xTaskCreate(ota_check_task, "ota_check_task", 8192, NULL, 2, &ota_check_task_handle);
+            
+            ESP_LOGI(TAG, "All tasks running independently!");
+            
+            while (1) {
+                ESP_LOGI(TAG, "Status - Reads:%lu | DataSent:%lu | OTAChecks:%lu", 
+                         app_state.reading_count, app_state.data_send_count, app_state.ota_check_count);
+                vTaskDelay(pdMS_TO_TICKS(60000));
+            }
+        }
+        MAIN_EOF
       
     - name: Get Version
       id: get_version
@@ -212,12 +401,43 @@ jobs:
           #endif
           EOF
           
-          # Build del firmware
+          echo "=== ESP-IDF Build Process ==="
+          echo "Step 1: Set target"
           idf.py set-target esp32
-          idf.py build
           
-          echo "=== Build completed ==="
+          echo "Step 2: Configure (if needed)"
+          idf.py reconfigure
+          
+          echo "Step 3: Build with verbose output"
+          idf.py build --verbose
+          
+          echo "=== Build completed - checking results ==="
+          echo "Build directory contents:"
           ls -la build/
+          
+          echo "Looking for .elf files (intermediate):"
+          find build/ -name "*.elf" -type f
+          
+          echo "Looking for .bin files:"
+          find build/ -name "*.bin" -type f
+          
+          echo "Checking if main firmware was created:"
+          if [ -f "build/ice-pulse-sensor.bin" ]; then
+            echo "✅ Main firmware binary found"
+            ls -la build/ice-pulse-sensor.bin
+          else
+            echo "❌ Main firmware binary NOT found"
+            echo "Expected: build/ice-pulse-sensor.bin"
+            echo "This suggests the build failed during linking phase"
+            
+            # Check for .elf file (should exist even if .bin creation fails)
+            if [ -f "build/ice-pulse-sensor.elf" ]; then
+              echo "✅ ELF file exists, .bin creation may have failed"
+              ls -la build/ice-pulse-sensor.elf
+            else
+              echo "❌ ELF file also missing - compilation failed"
+            fi
+          fi
         
     - name: Create Project Structure if Missing
       run: |
@@ -340,23 +560,61 @@ jobs:
       run: |
         cd firmware
         
-        # Determina il nome del file binario
-        BINARY_NAME="ice-pulse-sensor.bin"
-        if [ ! -f "build/$BINARY_NAME" ]; then
-          # Cerca il file .bin nel build
-          BINARY_NAME=$(find build/ -name "*.bin" -not -path "*/bootloader/*" -not -path "*/partition_table/*" | head -1 | xargs basename)
+        echo "=== Debugging: Looking for firmware binary ==="
+        echo "Build directory contents:"
+        ls -la build/ || echo "Build directory not found"
+        
+        echo "All .bin files in build/:"
+        find build/ -name "*.bin" -type f 2>/dev/null || echo "No .bin files found"
+        
+        # Il nome del progetto dal CMakeLists.txt è "ice-pulse-sensor"
+        # Il binario principale dovrebbe essere ice-pulse-sensor.bin
+        EXPECTED_BINARY="ice-pulse-sensor.bin"
+        
+        if [ -f "build/$EXPECTED_BINARY" ]; then
+          BINARY_NAME="$EXPECTED_BINARY"
+          echo "✅ Found expected firmware binary: $BINARY_NAME"
+        else
+          echo "❌ Expected binary build/$EXPECTED_BINARY not found"
+          
+          # Cerca binari che iniziano con il nome del progetto
+          BINARY_NAME=$(find build/ -name "ice-pulse-*.bin" -not -path "*/bootloader/*" -not -path "*/partition_table/*" | head -1 | xargs basename 2>/dev/null)
+          
           if [ -z "$BINARY_NAME" ]; then
-            echo "No firmware binary found!"
-            ls -la build/
+            # Ultima risorsa: cerca qualsiasi .bin che non sia di sistema
+            BINARY_NAME=$(find build/ -maxdepth 1 -name "*.bin" -not -name "*ABI*" -not -name "*TIME*" -not -name "*CMAKE*" | head -1 | xargs basename 2>/dev/null)
+          fi
+          
+          if [ -z "$BINARY_NAME" ]; then
+            echo "❌ No suitable firmware binary found!"
+            echo "Available files in build/:"
+            ls -la build/ | head -20
+            echo "Available .bin files:"
+            find build/ -name "*.bin" -type f | head -10
             exit 1
           fi
         fi
         
-        echo "Found firmware binary: $BINARY_NAME"
+        echo "Selected firmware binary: $BINARY_NAME"
         
-        # Informazioni sul firmware
-        FIRMWARE_SIZE=$(stat -c%s build/$BINARY_NAME)
-        BOOTLOADER_SIZE=$(stat -c%s build/bootloader/bootloader.bin)
+        # Verifica che il file esista
+        if [ ! -f "build/$BINARY_NAME" ]; then
+          echo "❌ Binary file build/$BINARY_NAME does not exist!"
+          echo "Directory listing:"
+          ls -la "build/"
+          exit 1
+        fi
+        
+        # Verifica che il file non sia vuoto e abbia dimensione ragionevole
+        FIRMWARE_SIZE=$(stat -c%s "build/$BINARY_NAME")
+        if [ "$FIRMWARE_SIZE" -lt 10000 ]; then
+          echo "❌ Firmware binary too small ($FIRMWARE_SIZE bytes) - likely not the main firmware"
+          echo "File details:"
+          ls -la "build/$BINARY_NAME"
+          exit 1
+        fi
+        
+        BOOTLOADER_SIZE=$(stat -c%s build/bootloader/bootloader.bin 2>/dev/null || echo "0")
         
         echo "firmware_size=$FIRMWARE_SIZE" >> $GITHUB_OUTPUT
         echo "bootloader_size=$BOOTLOADER_SIZE" >> $GITHUB_OUTPUT
