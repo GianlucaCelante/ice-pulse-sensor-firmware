@@ -392,22 +392,40 @@ jobs:
       run: |
         cd firmware
         
-        # Determina il nome del file binario
+        # Determina il nome del file binario principale
         BINARY_NAME="ice-pulse-sensor.bin"
-        if [ ! -f "build/$BINARY_NAME" ]; then
-          # Cerca il file .bin nel build
-          BINARY_NAME=$(find build/ -name "*.bin" -not -path "*/bootloader/*" -not -path "*/partition_table/*" | head -1 | xargs basename)
+        
+        # Controlla se il file principale esiste
+        if [ -f "build/$BINARY_NAME" ]; then
+          echo "Found main firmware binary: $BINARY_NAME"
+        else
+          # Cerca file .bin nella directory build escludendo file di sistema
+          BINARY_NAME=$(find build/ -name "*.bin" \
+            -not -path "*/bootloader/*" \
+            -not -path "*/partition_table/*" \
+            -not -name "*ABI*" \
+            -not -name "*test*" \
+            -not -name "*cmake*" \
+            | grep -E "(\.bin)$" | head -1 | xargs basename 2>/dev/null)
+          
           if [ -z "$BINARY_NAME" ]; then
-            echo "No firmware binary found!"
-            ls -la build/
+            echo "❌ No main firmware binary found!"
+            echo "Available .bin files in build/:"
+            find build/ -name "*.bin" -type f | head -10
             exit 1
           fi
+          
+          echo "Found firmware binary: $BINARY_NAME"
         fi
         
-        echo "Found firmware binary: $BINARY_NAME"
+        # Verifica che il file esista
+        if [ ! -f "build/$BINARY_NAME" ]; then
+          echo "❌ Binary file build/$BINARY_NAME does not exist!"
+          exit 1
+        fi
         
         # Informazioni sul firmware
-        FIRMWARE_SIZE=$(stat -c%s build/$BINARY_NAME)
+        FIRMWARE_SIZE=$(stat -c%s "build/$BINARY_NAME")
         BOOTLOADER_SIZE=$(stat -c%s build/bootloader/bootloader.bin)
         
         echo "firmware_size=$FIRMWARE_SIZE" >> $GITHUB_OUTPUT
