@@ -264,12 +264,43 @@ jobs:
           #endif
           EOF
           
-          # Build del firmware
+          echo "=== ESP-IDF Build Process ==="
+          echo "Step 1: Set target"
           idf.py set-target esp32
-          idf.py build
           
-          echo "=== Build completed ==="
+          echo "Step 2: Configure (if needed)"
+          idf.py reconfigure
+          
+          echo "Step 3: Build with verbose output"
+          idf.py build --verbose
+          
+          echo "=== Build completed - checking results ==="
+          echo "Build directory contents:"
           ls -la build/
+          
+          echo "Looking for .elf files (intermediate):"
+          find build/ -name "*.elf" -type f
+          
+          echo "Looking for .bin files:"
+          find build/ -name "*.bin" -type f
+          
+          echo "Checking if main firmware was created:"
+          if [ -f "build/ice-pulse-sensor.bin" ]; then
+            echo "✅ Main firmware binary found"
+            ls -la build/ice-pulse-sensor.bin
+          else
+            echo "❌ Main firmware binary NOT found"
+            echo "Expected: build/ice-pulse-sensor.bin"
+            echo "This suggests the build failed during linking phase"
+            
+            # Check for .elf file (should exist even if .bin creation fails)
+            if [ -f "build/ice-pulse-sensor.elf" ]; then
+              echo "✅ ELF file exists, .bin creation may have failed"
+              ls -la build/ice-pulse-sensor.elf
+            else
+              echo "❌ ELF file also missing - compilation failed"
+            fi
+          fi
         
     - name: Create Project Structure if Missing
       run: |
