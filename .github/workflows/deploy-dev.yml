@@ -190,12 +190,34 @@ jobs:
         echo "version=$VERSION" >> $GITHUB_OUTPUT
         echo "Building firmware version: $VERSION"
         
-    - name: Setup ESP-IDF
+    - name: Setup ESP-IDF and Build
       uses: espressif/esp-idf-ci-action@v1
       with:
         esp_idf_version: ${{ env.ESP_IDF_VERSION }}
         target: esp32
         path: 'firmware'
+        command: |
+          echo "=== Building ESP32 firmware ==="
+          echo "Current directory: $(pwd)"
+          ls -la .
+
+          # Aggiorna version.h con versione corrente
+          cat > main/version.h << EOF
+          #ifndef VERSION_H
+          #define VERSION_H
+          #define FIRMWARE_VERSION "${{ steps.get_version.outputs.version }}"
+          #define BUILD_TIMESTAMP "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          #define GIT_COMMIT "${{ github.sha }}"
+          #define BUILD_NUMBER "${{ github.run_number }}"
+          #endif
+          EOF
+          
+          # Build del firmware
+          idf.py set-target esp32
+          idf.py build
+          
+          echo "=== Build completed ==="
+          ls -la build/
         
     - name: Create Project Structure if Missing
       run: |
@@ -311,31 +333,7 @@ jobs:
         echo "=== Project structure created ==="
         ls -la .
         ls -la main/
-        
-    - name: Build Firmware
-      working-directory: firmware
-      run: |
-        echo "=== Building ESP32 firmware ==="
-        echo "Current directory: $(pwd)"
-        ls -la .
 
-        # Aggiorna version.h con versione corrente
-        cat > main/version.h << EOF
-        #ifndef VERSION_H
-        #define VERSION_H
-        #define FIRMWARE_VERSION "${{ steps.get_version.outputs.version }}"
-        #define BUILD_TIMESTAMP "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        #define GIT_COMMIT "${{ github.sha }}"
-        #define BUILD_NUMBER "${{ github.run_number }}"
-        #endif
-        EOF
-        
-        # Build del firmware
-        idf.py set-target esp32
-        idf.py build
-        
-        echo "=== Build completed ==="
-        ls -la build/
         
     - name: Extract Build Info
       id: build_info
