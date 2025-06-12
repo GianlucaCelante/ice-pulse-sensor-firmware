@@ -42,11 +42,23 @@ jobs:
         # Create components directory if it doesn't exist
         mkdir -p firmware/components
         
-        # Simplify main CMakeLists.txt to only include existing files
+        # CRITICAL FIX: Remove conflicting files and use consistent naming
+        echo "=== Fixing project structure conflicts ==="
+        
+        # Remove the conflicting basic main.c (keep the OTA-enabled Main.c)
+        rm -f firmware/main/main.c
+        
+        # Rename Main.c to main.c (ESP-IDF expects lowercase)
+        if [ -f firmware/main/Main.c ]; then
+          mv firmware/main/Main.c firmware/main/main.c
+          echo "✅ Renamed Main.c to main.c"
+        fi
+        
+        # Fix CMakeLists.txt to match the actual file
         cat > firmware/main/CMakeLists.txt << 'EOF'
         idf_component_register(
             SRCS 
-                "Main.c"
+                "main.c"
             
             INCLUDE_DIRS 
                 "."
@@ -65,8 +77,8 @@ jobs:
         )
         EOF
         
-        # Create a simplified Main.c with separated OTA logic
-        cat > firmware/main/Main.c << 'EOF'
+        echo "=== Fixed project structure ==="
+        ls -la firmware/main/
         // firmware/main/main.c - Ice Pulse ESP32 Main Application (OTA Separato)
         #include <stdio.h>
         #include <stdlib.h>
@@ -222,10 +234,9 @@ jobs:
                 vTaskDelay(pdMS_TO_TICKS(60000)); // Status ogni minuto
             }
         }
-        EOF        EOF
-        
-        echo "Created separated OTA logic Main.c and CMakeLists.txt"
-        ls -la firmware/main/
+        EOF        
+        # Move OTA logic to main.c (with correct name)
+        cat > firmware/main/main.c << 'EOF'
       
     - name: Get Version
       id: get_version
